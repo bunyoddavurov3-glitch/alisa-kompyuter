@@ -1,22 +1,23 @@
 import os
-import time
 import secrets
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Railway Environment Variables
 AGENT_SECRET = os.environ.get("AGENT_SECRET", "")
 DEVICE_ID = "windows_pc"
 
-# Buyruqlar navbati
-command = None
-command_id = None
+pending_command = None
+pending_command_id = None
 
 
 def check_agent_auth():
     token = request.headers.get("X-Agent-Token", "")
-    return AGENT_SECRET and secrets.compare_digest(token, AGENT_SECRET)
+
+    if not AGENT_SECRET:
+        return False
+
+    return secrets.compare_digest(token, AGENT_SECRET)
 
 
 @app.route("/", methods=["GET", "HEAD"])
@@ -24,7 +25,14 @@ def home():
     return "Alisa Kompyuter serveri ishlayapti", 200
 
 
-# Yandex Smart Home: qurilmalar ro'yxati
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ok",
+        "service": "alisa-kompyuter"
+    })
+
+
 @app.route("/v1.0/user/devices", methods=["GET"])
 def devices():
     request_id = request.headers.get("X-Request-Id", "")
@@ -57,17 +65,16 @@ def devices():
     })
 
 
-# Yandex qurilma holatini so'raganda
 @app.route("/v1.0/user/devices/query", methods=["POST"])
 def query_devices():
     data = request.get_json(silent=True) or {}
     request_id = request.headers.get("X-Request-Id", "")
 
-    devices = []
+    result_devices = []
 
     for device in data.get("devices", []):
         if device.get("id") == DEVICE_ID:
-            devices.append({
+            result_devices.append({
                 "id": DEVICE_ID,
                 "capabilities": [
                     {
@@ -83,15 +90,15 @@ def query_devices():
     return jsonify({
         "request_id": request_id,
         "payload": {
-            "devices": devices
+            "devices": result_devices
         }
     })
 
 
-# Yandex kompyuterni o'chirish buyrug'ini yuborganda
 @app.route("/v1.0/user/devices/action", methods=["POST"])
 def action():
-    global command, command_id
+    global pending_command
+    global pending_command_id
 
     data = request.get_json(silent=True) or {}
     request_id = request.headers.get("X-Request-Id", "")
@@ -101,15 +108,17 @@ def action():
             continue
 
         for capability in device.get("capabilities", []):
-            if capability.get("type") == "devices.capabilities.on_off":
-                state = capability.get("state", {})
+            if capability.get("type") != "devices.capabilities.on_off":
+                continue
 
-                if (
-                    state.get("instance") == "on"
-                    and state.get("value") is False
-                ):
-                    command = "shutdown"
-                    command_id = secrets.token_hex(16)
+            state = capability.get("state", {})
+
+            if (
+                state.get("instance") == "on"
+                and state.get("value") is False
+            ):
+                pending_command = "shutdown"
+                pending_command_id = secrets.token_hex(16)
 
     return jsonify({
         "request_id": request_id,
@@ -134,22 +143,24 @@ def action():
     })
 
 
-# Windows agent buyruqni tekshiradi
 @app.route("/agent/poll", methods=["GET"])
 def agent_poll():
-    global command, command_id
+    global pending_command
+    global pending_command_id
 
     if not check_agent_auth():
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({
+            "error": "unauthorized"
+        }), 401
 
-    if command:
+    if pending_command:
         result = {
-            "command": command,
-            "id": command_id
+            "command": pending_command,
+            "id": pending_command_id
         }
 
-        command = None
-        command_id = None
+        pending_command = None
+        pending_command_id = None
 
         return jsonify(result)
 
@@ -158,14 +169,9 @@ def agent_poll():
     })
 
 
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({
-        "status": "ok",
-        "service": "alisa-kompyuter"
-    })
-
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
