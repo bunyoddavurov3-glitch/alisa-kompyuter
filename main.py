@@ -55,13 +55,7 @@ def _unb64(value: str) -> bytes:
 def make_signed_token(kind, user_id, scope, expires_at):
     if not TOKEN_SECRET:
         return make_legacy_token()
-    payload = {
-        "kind": kind,
-        "user_id": user_id,
-        "scope": scope or "",
-        "exp": int(expires_at),
-        "v": 1,
-    }
+    payload = {"kind": kind, "user_id": user_id, "scope": scope or "", "exp": int(expires_at), "v": 1}
     raw = _b64(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
     signature = hmac.new(TOKEN_SECRET, raw.encode("ascii"), hashlib.sha256).digest()
     return raw + "." + _b64(signature)
@@ -73,15 +67,10 @@ def verify_signed_token(token, expected_kind):
     try:
         raw, signature = token.rsplit(".", 1)
         expected = hmac.new(TOKEN_SECRET, raw.encode("ascii"), hashlib.sha256).digest()
-        supplied = _unb64(signature)
-        if not hmac.compare_digest(expected, supplied):
+        if not hmac.compare_digest(expected, _unb64(signature)):
             return None
         payload = json.loads(_unb64(raw).decode("utf-8"))
-        if payload.get("kind") != expected_kind:
-            return None
-        if int(payload.get("exp", 0)) <= int(time.time()):
-            return None
-        if not payload.get("user_id"):
+        if payload.get("kind") != expected_kind or int(payload.get("exp", 0)) <= int(time.time()) or not payload.get("user_id"):
             return None
         return payload
     except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
@@ -91,24 +80,17 @@ def verify_signed_token(token, expected_kind):
 def check_access_token():
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
-        print(f"AUTH DEBUG: missing/invalid Authorization header on {request.path}; headers={list(request.headers.keys())}")
         return False, None
-
     token = header[7:].strip()
     signed = verify_signed_token(token, "access")
     if signed:
-        print(f"AUTH DEBUG: valid signed access token on {request.path}")
         return True, signed
-
     data = ACCESS_TOKENS.get(token)
     if not data:
-        print(f"AUTH DEBUG: token not recognized on {request.path}; token_len={len(token)}")
         return False, None
     if time.time() > data["expires_at"]:
         ACCESS_TOKENS.pop(token, None)
-        print(f"AUTH DEBUG: token expired on {request.path}")
         return False, None
-    print(f"AUTH DEBUG: valid process-local token on {request.path}")
     return True, data
 
 
@@ -122,33 +104,16 @@ def oauth_error(message, status=400):
 
 
 def yandex_unauthorized():
-    return jsonify({
-        "error_code": "UNAUTHORIZED",
-        "error_message": "Invalid access token"
-    }), 401
+    return jsonify({"error_code": "UNAUTHORIZED", "error_message": "Invalid access token"}), 401
 
 
-def action_response(device_id, status, error_code=None, error_message=None):
+def action_response(device_id, capability_type, instance, status, error_code=None, error_message=None):
     result = {"status": status}
     if error_code:
         result["error_code"] = error_code
     if error_message:
         result["error_message"] = error_message
-    return jsonify({
-        "request_id": request_id(),
-        "payload": {
-            "devices": [{
-                "id": device_id,
-                "capabilities": [{
-                    "type": "devices.capabilities.on_off",
-                    "state": {
-                        "instance": "on",
-                        "action_result": result
-                    }
-                }]
-            }]
-        }
-    })
+    return jsonify({"request_id": request_id(), "payload": {"devices": [{"id": device_id, "capabilities": [{"type": capability_type, "state": {"instance": instance, "action_result": result}}]}]}})
 
 
 @app.route("/", methods=["GET", "HEAD"])
@@ -158,11 +123,7 @@ def home():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({
-        "status": "ok",
-        "device": DEVICE_ID,
-        "agent_online": agent_is_online()
-    })
+    return jsonify({"status": "ok", "device": DEVICE_ID, "agent_online": agent_is_online()})
 
 
 @app.route("/oauth/authorize", methods=["GET"])
@@ -171,33 +132,18 @@ def oauth_authorize():
         return oauth_error("unsupported_response_type")
     if request.args.get("client_id") != CLIENT_ID:
         return oauth_error("invalid_client", 401)
-
     redirect_uri = request.args.get("redirect_uri")
     if not redirect_uri:
         return oauth_error("invalid_request")
-
     requested_scope = request.args.get("scope", "")
     state = request.args.get("state", "")
     code = make_code()
-    AUTH_CODES[code] = {
-        "client_id": CLIENT_ID,
-        "scope": requested_scope,
-        "redirect_uri": redirect_uri,
-        "created_at": time.time()
-    }
-
-    params = {
-        "code": code,
-        "client_id": CLIENT_ID,
-        "scope": requested_scope,
-    }
+    AUTH_CODES[code] = {"client_id": CLIENT_ID, "scope": requested_scope, "redirect_uri": redirect_uri, "created_at": time.time()}
+    params = {"code": code, "client_id": CLIENT_ID, "scope": requested_scope}
     if state:
         params["state"] = state
-
     separator = "&" if "?" in redirect_uri else "?"
-    url = redirect_uri + separator + urlencode(params)
-    print(f"OAUTH AUTHORIZE: client_id={CLIENT_ID}, scope={requested_scope!r}, state_present={bool(state)}")
-    return redirect(url)
+    return redirect(redirect_uri + separator + urlencode(params))
 
 
 @app.route("/oauth/token", methods=["POST"])
@@ -205,15 +151,10 @@ def oauth_token():
     grant_type = request.form.get("grant_type", "")
     client_id = request.form.get("client_id", "")
     client_secret = request.form.get("client_secret", "")
-
     if not client_id:
         basic = request.authorization
         if basic:
-            client_id = basic.username or ""
-            client_secret = basic.password or ""
-
-    print(f"OAUTH TOKEN: grant_type={grant_type!r}, client_id_ok={client_id == CLIENT_ID}, form_keys={list(request.form.keys())}")
-
+            client_id, client_secret = basic.username or "", basic.password or ""
     if client_id != CLIENT_ID:
         return oauth_error("invalid_client", 401)
     if CLIENT_SECRET and client_secret != CLIENT_SECRET:
@@ -224,61 +165,26 @@ def oauth_token():
         data = AUTH_CODES.pop(code, None)
         if not data or time.time() - data["created_at"] > 600:
             return oauth_error("invalid_grant")
-
         user_id = "windows_user"
         scope = data.get("scope", "")
-        expires_at = time.time() + 30 * 24 * 60 * 60
-        access_token = make_signed_token("access", user_id, scope, expires_at)
+        access_expires = time.time() + 30 * 24 * 60 * 60
+        access_token = make_signed_token("access", user_id, scope, access_expires)
         refresh_token = make_signed_token("refresh", user_id, scope, time.time() + 180 * 24 * 60 * 60)
-
-        ACCESS_TOKENS[access_token] = {
-            "user_id": user_id,
-            "scope": scope,
-            "expires_at": expires_at
-        }
-        REFRESH_TOKENS[refresh_token] = {
-            "user_id": user_id,
-            "scope": scope
-        }
-
-        print(f"OAUTH TOKEN: issued access token len={len(access_token)}, refresh token len={len(refresh_token)}, scope={scope!r}")
-        return jsonify({
-            "access_token": access_token,
-            "token_type": "Bearer",
-            "expires_in": 2592000,
-            "refresh_token": refresh_token
-        })
+        ACCESS_TOKENS[access_token] = {"user_id": user_id, "scope": scope, "expires_at": access_expires}
+        REFRESH_TOKENS[refresh_token] = {"user_id": user_id, "scope": scope}
+        return jsonify({"access_token": access_token, "token_type": "Bearer", "expires_in": 2592000, "refresh_token": refresh_token})
 
     if grant_type == "refresh_token":
         refresh_token = request.form.get("refresh_token", "")
         signed = verify_signed_token(refresh_token, "refresh")
         if signed:
-            user_id = signed["user_id"]
-            scope = signed.get("scope", "")
-            expires_at = time.time() + 30 * 24 * 60 * 60
-            access_token = make_signed_token("access", user_id, scope, expires_at)
-            return jsonify({
-                "access_token": access_token,
-                "token_type": "Bearer",
-                "expires_in": 2592000
-            })
-
+            access_token = make_signed_token("access", signed["user_id"], signed.get("scope", ""), time.time() + 30 * 24 * 60 * 60)
+            return jsonify({"access_token": access_token, "token_type": "Bearer", "expires_in": 2592000})
         data = REFRESH_TOKENS.get(refresh_token)
         if not data:
             return oauth_error("invalid_grant")
-
-        expires_at = time.time() + 30 * 24 * 60 * 60
-        access_token = make_signed_token("access", data["user_id"], data["scope"], expires_at)
-        ACCESS_TOKENS[access_token] = {
-            "user_id": data["user_id"],
-            "scope": data["scope"],
-            "expires_at": expires_at
-        }
-        return jsonify({
-            "access_token": access_token,
-            "token_type": "Bearer",
-            "expires_in": 2592000
-        })
+        access_token = make_signed_token("access", data["user_id"], data["scope"], time.time() + 30 * 24 * 60 * 60)
+        return jsonify({"access_token": access_token, "token_type": "Bearer", "expires_in": 2592000})
 
     return oauth_error("unsupported_grant_type")
 
@@ -293,7 +199,6 @@ def get_devices():
     ok, token_data = check_access_token()
     if not ok:
         return yandex_unauthorized()
-
     return jsonify({
         "request_id": request_id(),
         "payload": {
@@ -303,21 +208,17 @@ def get_devices():
                 "name": DEVICE_NAME,
                 "description": "Windows kompyuter",
                 "room": "Xona",
-                "type": "devices.types.other",
+                "type": "devices.types.media_device",
                 "status_info": {"reportable": False},
                 "custom_data": {"device": DEVICE_ID},
-                "capabilities": [{
-                    "type": "devices.capabilities.on_off",
-                    "retrievable": False,
-                    "reportable": False,
-                    "parameters": {"split": False}
-                }],
+                "capabilities": [
+                    {"type": "devices.capabilities.on_off", "retrievable": False, "reportable": False, "parameters": {"split": False}},
+                    {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "pause"}},
+                    {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "mute"}},
+                    {"type": "devices.capabilities.range", "retrievable": False, "reportable": False, "parameters": {"instance": "volume", "random_access": True, "range": {"min": 0, "max": 100, "precision": 1}, "unit": "unit.percent"}}
+                ],
                 "properties": [],
-                "device_info": {
-                    "manufacturer": "Windows",
-                    "model": "Windows PC",
-                    "sw_version": "1.0"
-                }
+                "device_info": {"manufacturer": "Windows", "model": "Windows PC", "sw_version": "1.0"}
             }]
         }
     })
@@ -328,23 +229,12 @@ def query_devices():
     ok, _ = check_access_token()
     if not ok:
         return yandex_unauthorized()
-
     body = request.get_json(silent=True) or {}
     online = agent_is_online()
     devices = []
     for device in body.get("devices", []):
-        devices.append({
-            "id": device.get("id", DEVICE_ID),
-            "capabilities": [{
-                "type": "devices.capabilities.on_off",
-                "state": {"instance": "on", "value": online}
-            }]
-        })
-
-    return jsonify({
-        "request_id": request_id(),
-        "payload": {"devices": devices}
-    })
+        devices.append({"id": device.get("id", DEVICE_ID), "capabilities": [{"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": online}}]})
+    return jsonify({"request_id": request_id(), "payload": {"devices": devices}})
 
 
 @app.route("/v1.0/user/devices/action", methods=["POST"])
@@ -352,7 +242,6 @@ def device_action():
     ok, _ = check_access_token()
     if not ok:
         return yandex_unauthorized()
-
     body = request.get_json(silent=True) or {}
     devices = body.get("payload", {}).get("devices", [])
     if not devices:
@@ -361,24 +250,54 @@ def device_action():
     for device in devices:
         device_id = device.get("id", DEVICE_ID)
         if device_id != DEVICE_ID:
-            return action_response(device_id, "ERROR", "DEVICE_NOT_FOUND", "Kompyuter qurilmasi topilmadi")
+            return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "DEVICE_NOT_FOUND", "Kompyuter qurilmasi topilmadi")
 
         for capability in device.get("capabilities", []):
-            if capability.get("type") != "devices.capabilities.on_off":
-                continue
+            ctype = capability.get("type")
+            state = capability.get("state", {})
+            instance = state.get("instance")
+            value = state.get("value")
+            relative = state.get("relative", False)
 
-            value = capability.get("state", {}).get("value")
-            if value is False:
-                if not agent_is_online():
-                    return action_response(device_id, "ERROR", "DEVICE_UNREACHABLE", "Windows agent ishlamayapti yoki kompyuter ulanmagan")
+            if ctype == "devices.capabilities.on_off" and instance == "on":
+                if value is False:
+                    if not agent_is_online():
+                        return action_response(device_id, ctype, instance, "ERROR", "DEVICE_UNREACHABLE", "Windows agent ishlamayapti yoki kompyuter ulanmagan")
+                    with QUEUE_LOCK:
+                        COMMAND_QUEUE.append({"command": "shutdown", "created_at": time.time()})
+                    print("Yandex: SHUTDOWN buyrug'i navbatga qo'shildi")
+                    return action_response(device_id, ctype, instance, "DONE")
+                return action_response(device_id, ctype, instance, "ERROR", "INVALID_ACTION", "Kompyuterni masofadan yoqish hozircha qo'llab-quvvatlanmaydi")
+
+            if ctype == "devices.capabilities.toggle" and instance == "pause":
                 with QUEUE_LOCK:
-                    COMMAND_QUEUE.append({"command": "shutdown", "created_at": time.time()})
-                print("Yandex: SHUTDOWN buyrug'i navbatga qo'shildi")
-                return action_response(device_id, "DONE")
+                    COMMAND_QUEUE.append({"command": "play_pause", "created_at": time.time(), "value": bool(value)})
+                return action_response(device_id, ctype, instance, "DONE")
 
-            return action_response(device_id, "ERROR", "INVALID_ACTION", "Kompyuterni masofadan yoqish hozircha qo'llab-quvvatlanmaydi")
+            if ctype == "devices.capabilities.toggle" and instance == "mute":
+                with QUEUE_LOCK:
+                    COMMAND_QUEUE.append({"command": "mute", "created_at": time.time(), "value": bool(value)})
+                return action_response(device_id, ctype, instance, "DONE")
 
-    return action_response(DEVICE_ID, "ERROR", "INVALID_ACTION", "Qo'llab-quvvatlanmagan buyruq")
+            if ctype == "devices.capabilities.range" and instance == "volume":
+                try:
+                    amount = float(value)
+                except (TypeError, ValueError):
+                    return action_response(device_id, ctype, instance, "ERROR", "INVALID_VALUE", "Ovoz qiymati noto'g'ri")
+                if relative:
+                    command = "volume_up" if amount > 0 else "volume_down"
+                    count = max(1, min(100, int(round(abs(amount)))))
+                    with QUEUE_LOCK:
+                        COMMAND_QUEUE.append({"command": command, "created_at": time.time(), "count": count})
+                else:
+                    percent = max(0, min(100, int(round(amount))))
+                    with QUEUE_LOCK:
+                        COMMAND_QUEUE.append({"command": "volume_set", "created_at": time.time(), "percent": percent})
+                return action_response(device_id, ctype, instance, "DONE")
+
+        return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "INVALID_ACTION", "Qo'llab-quvvatlanmagan buyruq")
+
+    return action_response(DEVICE_ID, "devices.capabilities.on_off", "on", "ERROR", "INVALID_ACTION", "Qo'llab-quvvatlanmagan buyruq")
 
 
 @app.route("/agent/poll", methods=["GET"])
@@ -386,45 +305,57 @@ def agent_poll():
     global LAST_AGENT_POLL
     if not check_agent_secret():
         return jsonify({"ok": False, "error": "Ruxsat berilmadi"}), 401
-
     LAST_AGENT_POLL = time.time()
     with QUEUE_LOCK:
         command = COMMAND_QUEUE.popleft() if COMMAND_QUEUE else None
-
     if command is None:
         return jsonify({"ok": True, "command": None, "agent_online": True})
-
-    return jsonify({
-        "ok": True,
-        "command": command.get("command"),
-        "hours": command.get("hours"),
-        "agent_online": True
-    })
+    response = {"ok": True, "command": command.get("command"), "agent_online": True}
+    for key in ("hours", "seconds", "percent", "count", "value"):
+        if key in command:
+            response[key] = command[key]
+    return jsonify(response)
 
 
 @app.route("/command", methods=["POST"])
 def local_command():
     if not check_agent_secret():
         return jsonify({"ok": False, "error": "Ruxsat berilmadi"}), 401
-
     data = request.get_json(silent=True) or {}
     command = data.get("command")
-
+    allowed = {"shutdown", "restart", "sleep", "shutdown_after", "cancel_shutdown", "play_pause", "previous", "next", "stop", "mute", "volume_up", "volume_down", "volume_set"}
+    if command not in allowed:
+        return jsonify({"ok": False, "error": "Noma'lum buyruq"}), 400
+    item = {"command": command, "created_at": time.time()}
     if command == "sleep":
         hours = data.get("hours", 1)
         if hours not in (1, 2):
             return jsonify({"ok": False, "error": "Faqat 1 yoki 2 soat"}), 400
-    elif command not in ("shutdown", "restart"):
-        return jsonify({"ok": False, "error": "Noma'lum buyruq"}), 400
-    else:
-        hours = None
-
+        item["hours"] = hours
+    elif command == "shutdown_after":
+        try:
+            seconds = int(data.get("seconds"))
+            if seconds < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "seconds noto'g'ri"}), 400
+        item["seconds"] = seconds
+    elif command == "volume_set":
+        try:
+            percent = int(data.get("percent"))
+            if not 0 <= percent <= 100:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "percent 0-100 oralig'ida bo'lishi kerak"}), 400
+        item["percent"] = percent
+    elif command in ("volume_up", "volume_down"):
+        try:
+            count = max(1, min(100, int(data.get("count", 1))))
+        except (TypeError, ValueError):
+            count = 1
+        item["count"] = count
     with QUEUE_LOCK:
-        item = {"command": command, "created_at": time.time()}
-        if hours is not None:
-            item["hours"] = hours
         COMMAND_QUEUE.append(item)
-
     return jsonify({"ok": True})
 
 
