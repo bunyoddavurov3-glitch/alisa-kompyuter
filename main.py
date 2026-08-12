@@ -212,8 +212,8 @@ def get_devices():
                 "status_info": {"reportable": False},
                 "custom_data": {"device": DEVICE_ID},
                 "capabilities": [
-                    {"type": "devices.capabilities.on_off", "retrievable": False, "reportable": False, "parameters": {"split": False}},
                     {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "pause"}},
+                    {"type": "devices.capabilities.on_off", "retrievable": False, "reportable": False, "parameters": {"split": False}},
                     {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "mute"}},
                     {"type": "devices.capabilities.range", "retrievable": False, "reportable": False, "parameters": {"instance": "volume", "random_access": True, "range": {"min": 0, "max": 100, "precision": 1}, "unit": "unit.percent"}}
                 ],
@@ -252,7 +252,37 @@ def device_action():
         if device_id != DEVICE_ID:
             return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "DEVICE_NOT_FOUND", "Kompyuter qurilmasi topilmadi")
 
-        for capability in device.get("capabilities", []):
+        capabilities = device.get("capabilities", [])
+
+        # Muhim himoya: agar Yandex bitta so'rovda pause va power-off
+        # ni birga yuborsa, pauza har doim ustuvor bo'ladi.
+        pause_capability = next(
+            (
+                capability for capability in capabilities
+                if capability.get("type") == "devices.capabilities.toggle"
+                and capability.get("state", {}).get("instance") == "pause"
+            ),
+            None
+        )
+
+        if pause_capability is not None:
+            state = pause_capability.get("state", {})
+            value = state.get("value")
+            with QUEUE_LOCK:
+                COMMAND_QUEUE.append({
+                    "command": "play_pause",
+                    "created_at": time.time(),
+                    "value": bool(value)
+                })
+            print("Yandex: PAUSE buyrug'i ustuvor qilib navbatga qo'shildi")
+            return action_response(
+                device_id,
+                "devices.capabilities.toggle",
+                "pause",
+                "DONE"
+            )
+
+        for capability in capabilities:
             ctype = capability.get("type")
             state = capability.get("state", {})
             instance = state.get("instance")
@@ -268,11 +298,6 @@ def device_action():
                     print("Yandex: SHUTDOWN buyrug'i navbatga qo'shildi")
                     return action_response(device_id, ctype, instance, "DONE")
                 return action_response(device_id, ctype, instance, "ERROR", "INVALID_ACTION", "Kompyuterni masofadan yoqish hozircha qo'llab-quvvatlanmaydi")
-
-            if ctype == "devices.capabilities.toggle" and instance == "pause":
-                with QUEUE_LOCK:
-                    COMMAND_QUEUE.append({"command": "play_pause", "created_at": time.time(), "value": bool(value)})
-                return action_response(device_id, ctype, instance, "DONE")
 
             if ctype == "devices.capabilities.toggle" and instance == "mute":
                 with QUEUE_LOCK:
