@@ -2,6 +2,10 @@ import os
 import secrets
 import time
 import threading
+import json
+import base64
+import hashlib
+import hmac
 from collections import deque
 from flask import Flask, request, jsonify, redirect
 
@@ -10,6 +14,7 @@ app = Flask(__name__)
 AGENT_SECRET = os.environ.get("AGENT_SECRET", "")
 CLIENT_ID = os.environ.get("OAUTH_CLIENT_ID", "alisa-kompyuter")
 CLIENT_SECRET = os.environ.get("OAUTH_CLIENT_SECRET", "")
+TOKEN_SECRET = (AGENT_SECRET or CLIENT_SECRET).encode("utf-8")
 
 DEVICE_ID = "windows_pc"
 DEVICE_NAME = "Kompyuter"
@@ -26,7 +31,7 @@ def make_code():
     return secrets.token_urlsafe(32)
 
 
-def make_token():
+def make_legacy_token():
     return secrets.token_urlsafe(48)
 
 
@@ -38,11 +43,58 @@ def agent_is_online():
     return LAST_AGENT_POLL > 0 and (time.time() - LAST_AGENT_POLL) < 15
 
 
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _unb64(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def make_signed_token(kind, user_id, scope, expires_at):
+    if not TOKEN_SECRET:
+        return make_legacy_token()
+    payload = {
+        "kind": kind,
+        "user_id": user_id,
+        "scope": scope or "",
+        "exp": int(expires_at),
+        "v": 1,
+    }
+    raw = _b64(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    signature = hmac.new(TOKEN_SECRET, raw.encode("ascii"), hashlib.sha256).digest()
+    return raw + "." + _b64(signature)
+
+
+def verify_signed_token(token, expected_kind):
+    if not TOKEN_SECRET or not token or "." not in token:
+        return None
+    try:
+        raw, signature = token.rsplit(".", 1)
+        expected = hmac.new(TOKEN_SECRET, raw.encode("ascii"), hashlib.sha256).digest()
+        supplied = _unb64(signature)
+        if not hmac.compare_digest(expected, supplied):
+            return None
+        payload = json.loads(_unb64(raw).decode("utf-8"))
+        if payload.get("kind") != expected_kind:
+            return None
+        if int(payload.get("exp", 0)) <= int(time.time()):
+            return None
+        if not payload.get("user_id"):
+            return None
+        return payload
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
 def check_access_token():
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
         return False, None
     token = header[7:].strip()
+    signed = verify_signed_token(token, "access")
+    if signed:
+        return True, signed
     data = ACCESS_TOKENS.get(token)
     if not data:
         return False, None
@@ -111,7 +163,6 @@ def oauth_authorize():
         return oauth_error("unsupported_response_type")
     if request.args.get("client_id") != CLIENT_ID:
         return oauth_error("invalid_client", 401)
-
     redirect_uri = request.args.get("redirect_uri")
     if not redirect_uri:
         return oauth_error("invalid_request")
@@ -120,9 +171,9 @@ def oauth_authorize():
     AUTH_CODES[code] = {
         "client_id": CLIENT_ID,
         "scope": request.args.get("scope", ""),
+        "redirect_uri": redirect_uri,
         "created_at": time.time()
     }
-
     separator = "&" if "?" in redirect_uri else "?"
     url = redirect_uri + separator + "code=" + code
     state = request.args.get("state")
@@ -148,18 +199,20 @@ def oauth_token():
         if not data or time.time() - data["created_at"] > 600:
             return oauth_error("invalid_grant")
 
-        access_token = make_token()
-        refresh_token = make_token()
+        user_id = "windows_user"
+        scope = data.get("scope", "")
         expires_at = time.time() + 30 * 24 * 60 * 60
+        access_token = make_signed_token("access", user_id, scope, expires_at)
+        refresh_token = make_signed_token("refresh", user_id, scope, time.time() + 180 * 24 * 60 * 60)
 
         ACCESS_TOKENS[access_token] = {
-            "user_id": "windows_user",
-            "scope": data.get("scope", ""),
+            "user_id": user_id,
+            "scope": scope,
             "expires_at": expires_at
         }
         REFRESH_TOKENS[refresh_token] = {
-            "user_id": "windows_user",
-            "scope": data.get("scope", "")
+            "user_id": user_id,
+            "scope": scope
         }
 
         return jsonify({
@@ -171,15 +224,28 @@ def oauth_token():
 
     if grant_type == "refresh_token":
         refresh_token = request.form.get("refresh_token", "")
+        signed = verify_signed_token(refresh_token, "refresh")
+        if signed:
+            user_id = signed["user_id"]
+            scope = signed.get("scope", "")
+            expires_at = time.time() + 30 * 24 * 60 * 60
+            access_token = make_signed_token("access", user_id, scope, expires_at)
+            return jsonify({
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": 2592000
+            })
+
         data = REFRESH_TOKENS.get(refresh_token)
         if not data:
             return oauth_error("invalid_grant")
 
-        access_token = make_token()
+        expires_at = time.time() + 30 * 24 * 60 * 60
+        access_token = make_signed_token("access", data["user_id"], data["scope"], expires_at)
         ACCESS_TOKENS[access_token] = {
             "user_id": data["user_id"],
             "scope": data["scope"],
-            "expires_at": time.time() + 30 * 24 * 60 * 60
+            "expires_at": expires_at
         }
         return jsonify({
             "access_token": access_token,
@@ -201,8 +267,6 @@ def get_devices():
     if not ok:
         return yandex_unauthorized()
 
-    # Yandex Smart Home talabi: status_info ichida faqat reportable bo'ladi.
-    # on_off uchun split parametridan foydalanilganda retrievable=false bo'lishi kerak.
     return jsonify({
         "request_id": request_id(),
         "payload": {
@@ -213,19 +277,13 @@ def get_devices():
                 "description": "Windows kompyuter",
                 "room": "Xona",
                 "type": "devices.types.other",
-                "status_info": {
-                    "reportable": False
-                },
-                "custom_data": {
-                    "device": DEVICE_ID
-                },
+                "status_info": {"reportable": False},
+                "custom_data": {"device": DEVICE_ID},
                 "capabilities": [{
                     "type": "devices.capabilities.on_off",
                     "retrievable": False,
                     "reportable": False,
-                    "parameters": {
-                        "split": False
-                    }
+                    "parameters": {"split": False}
                 }],
                 "properties": [],
                 "device_info": {
@@ -247,16 +305,12 @@ def query_devices():
     body = request.get_json(silent=True) or {}
     online = agent_is_online()
     devices = []
-
     for device in body.get("devices", []):
         devices.append({
             "id": device.get("id", DEVICE_ID),
             "capabilities": [{
                 "type": "devices.capabilities.on_off",
-                "state": {
-                    "instance": "on",
-                    "value": online
-                }
+                "state": {"instance": "on", "value": online}
             }]
         })
 
@@ -287,7 +341,6 @@ def device_action():
                 continue
 
             value = capability.get("state", {}).get("value")
-
             if value is False:
                 if not agent_is_online():
                     return action_response(device_id, "ERROR", "DEVICE_UNREACHABLE", "Windows agent ishlamayapti yoki kompyuter ulanmagan")
@@ -304,7 +357,6 @@ def device_action():
 @app.route("/agent/poll", methods=["GET"])
 def agent_poll():
     global LAST_AGENT_POLL
-
     if not check_agent_secret():
         return jsonify({"ok": False, "error": "Ruxsat berilmadi"}), 401
 
