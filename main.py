@@ -208,7 +208,7 @@ def get_devices():
                 "name": DEVICE_NAME,
                 "description": "Windows kompyuter",
                 "room": "Xona",
-                "type": "devices.types.media_device",
+                "type": "devices.types.media_device.tv_box",
                 "status_info": {"reportable": False},
                 "custom_data": {"device": DEVICE_ID},
                 "capabilities": [
