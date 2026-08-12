@@ -186,8 +186,6 @@ def oauth_authorize():
         "created_at": time.time()
     }
 
-    # Yandex Smart Home OAuth talabiga ko'ra code bilan birga
-    # state, client_id va scope ham aynan qaytariladi.
     params = {
         "code": code,
         "client_id": CLIENT_ID,
@@ -208,7 +206,6 @@ def oauth_token():
     client_id = request.form.get("client_id", "")
     client_secret = request.form.get("client_secret", "")
 
-    # Ba'zi OAuth klientlari client_id/client_secretni HTTP Basic orqali yuboradi.
     if not client_id:
         basic = request.authorization
         if basic:
@@ -357,12 +354,16 @@ def device_action():
         return yandex_unauthorized()
 
     body = request.get_json(silent=True) or {}
+    print(f"YANDEX ACTION DEBUG: body={json.dumps(body, ensure_ascii=False, separators=(\",\", \":\"))}")
+
     devices = body.get("payload", {}).get("devices", [])
     if not devices:
+        print("YANDEX ACTION DEBUG: no devices in payload")
         return jsonify({"request_id": request_id(), "payload": {"devices": []}})
 
     for device in devices:
         device_id = device.get("id", DEVICE_ID)
+        print(f"YANDEX ACTION DEBUG: device_id={device_id!r}, capabilities={device.get('capabilities', [])!r}")
         if device_id != DEVICE_ID:
             return action_response(device_id, "ERROR", "DEVICE_NOT_FOUND", "Kompyuter qurilmasi topilmadi")
 
@@ -371,8 +372,10 @@ def device_action():
                 continue
 
             value = capability.get("state", {}).get("value")
+            print(f"YANDEX ACTION DEBUG: capability_value={value!r}")
             if value is False:
                 if not agent_is_online():
+                    print("YANDEX ACTION DEBUG: agent offline")
                     return action_response(device_id, "ERROR", "DEVICE_UNREACHABLE", "Windows agent ishlamayapti yoki kompyuter ulanmagan")
                 with QUEUE_LOCK:
                     COMMAND_QUEUE.append({"command": "shutdown", "created_at": time.time()})
