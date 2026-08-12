@@ -7,6 +7,7 @@ import base64
 import hashlib
 import hmac
 from collections import deque
+from urllib.parse import urlencode
 from flask import Flask, request, jsonify, redirect
 
 app = Flask(__name__)
@@ -14,7 +15,7 @@ app = Flask(__name__)
 AGENT_SECRET = os.environ.get("AGENT_SECRET", "")
 CLIENT_ID = os.environ.get("OAUTH_CLIENT_ID", "alisa-kompyuter")
 CLIENT_SECRET = os.environ.get("OAUTH_CLIENT_SECRET", "")
-TOKEN_SECRET = (AGENT_SECRET or CLIENT_SECRET).encode("utf-8")
+TOKEN_SECRET = (os.environ.get("OAUTH_TOKEN_SECRET") or AGENT_SECRET or CLIENT_SECRET).encode("utf-8")
 
 DEVICE_ID = "windows_pc"
 DEVICE_NAME = "Kompyuter"
@@ -90,17 +91,24 @@ def verify_signed_token(token, expected_kind):
 def check_access_token():
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
+        print(f"AUTH DEBUG: missing/invalid Authorization header on {request.path}; headers={list(request.headers.keys())}")
         return False, None
+
     token = header[7:].strip()
     signed = verify_signed_token(token, "access")
     if signed:
+        print(f"AUTH DEBUG: valid signed access token on {request.path}")
         return True, signed
+
     data = ACCESS_TOKENS.get(token)
     if not data:
+        print(f"AUTH DEBUG: token not recognized on {request.path}; token_len={len(token)}")
         return False, None
     if time.time() > data["expires_at"]:
         ACCESS_TOKENS.pop(token, None)
+        print(f"AUTH DEBUG: token expired on {request.path}")
         return False, None
+    print(f"AUTH DEBUG: valid process-local token on {request.path}")
     return True, data
 
 
@@ -163,22 +171,34 @@ def oauth_authorize():
         return oauth_error("unsupported_response_type")
     if request.args.get("client_id") != CLIENT_ID:
         return oauth_error("invalid_client", 401)
+
     redirect_uri = request.args.get("redirect_uri")
     if not redirect_uri:
         return oauth_error("invalid_request")
 
+    requested_scope = request.args.get("scope", "")
+    state = request.args.get("state", "")
     code = make_code()
     AUTH_CODES[code] = {
         "client_id": CLIENT_ID,
-        "scope": request.args.get("scope", ""),
+        "scope": requested_scope,
         "redirect_uri": redirect_uri,
         "created_at": time.time()
     }
-    separator = "&" if "?" in redirect_uri else "?"
-    url = redirect_uri + separator + "code=" + code
-    state = request.args.get("state")
+
+    # Yandex Smart Home OAuth talabiga ko'ra code bilan birga
+    # state, client_id va scope ham aynan qaytariladi.
+    params = {
+        "code": code,
+        "client_id": CLIENT_ID,
+        "scope": requested_scope,
+    }
     if state:
-        url += "&state=" + state
+        params["state"] = state
+
+    separator = "&" if "?" in redirect_uri else "?"
+    url = redirect_uri + separator + urlencode(params)
+    print(f"OAUTH AUTHORIZE: client_id={CLIENT_ID}, scope={requested_scope!r}, state_present={bool(state)}")
     return redirect(url)
 
 
@@ -187,6 +207,15 @@ def oauth_token():
     grant_type = request.form.get("grant_type", "")
     client_id = request.form.get("client_id", "")
     client_secret = request.form.get("client_secret", "")
+
+    # Ba'zi OAuth klientlari client_id/client_secretni HTTP Basic orqali yuboradi.
+    if not client_id:
+        basic = request.authorization
+        if basic:
+            client_id = basic.username or ""
+            client_secret = basic.password or ""
+
+    print(f"OAUTH TOKEN: grant_type={grant_type!r}, client_id_ok={client_id == CLIENT_ID}, form_keys={list(request.form.keys())}")
 
     if client_id != CLIENT_ID:
         return oauth_error("invalid_client", 401)
@@ -215,6 +244,7 @@ def oauth_token():
             "scope": scope
         }
 
+        print(f"OAUTH TOKEN: issued access token len={len(access_token)}, refresh token len={len(refresh_token)}, scope={scope!r}")
         return jsonify({
             "access_token": access_token,
             "token_type": "Bearer",
