@@ -19,6 +19,9 @@ TOKEN_SECRET = (os.environ.get("OAUTH_TOKEN_SECRET") or AGENT_SECRET or CLIENT_S
 
 DEVICE_ID = "windows_pc"
 DEVICE_NAME = "Kompyuter"
+PREVIOUS_DEVICE_ID = "windows_pc_previous_track"
+NEXT_DEVICE_ID = "windows_pc_next_track"
+SHUTDOWN_TIMER_DEVICE_ID = "windows_pc_shutdown_timer"
 
 AUTH_CODES = {}
 ACCESS_TOKENS = {}
@@ -116,6 +119,26 @@ def action_response(device_id, capability_type, instance, status, error_code=Non
     return jsonify({"request_id": request_id(), "payload": {"devices": [{"id": device_id, "capabilities": [{"type": capability_type, "state": {"instance": instance, "action_result": result}}]}]}})
 
 
+def virtual_switch(device_id, name, description):
+    return {
+        "id": device_id,
+        "name": name,
+        "description": description,
+        "room": "Xona",
+        "type": "devices.types.switch",
+        "status_info": {"reportable": False},
+        "custom_data": {"device": device_id},
+        "capabilities": [{
+            "type": "devices.capabilities.on_off",
+            "retrievable": False,
+            "reportable": False,
+            "parameters": {"split": False}
+        }],
+        "properties": [],
+        "device_info": {"manufacturer": "Windows", "model": "Windows PC control", "sw_version": "1.0"}
+    }
+
+
 @app.route("/", methods=["GET", "HEAD"])
 def home():
     return "Alisa Kompyuter serveri ishlayapti", 200
@@ -199,27 +222,34 @@ def get_devices():
     ok, token_data = check_access_token()
     if not ok:
         return yandex_unauthorized()
+
+    devices = [{
+        "id": DEVICE_ID,
+        "name": DEVICE_NAME,
+        "description": "Windows kompyuter",
+        "room": "Xona",
+        "type": "devices.types.media_device.tv_box",
+        "status_info": {"reportable": False},
+        "custom_data": {"device": DEVICE_ID},
+        "capabilities": [
+            {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "pause"}},
+            {"type": "devices.capabilities.on_off", "retrievable": False, "reportable": False, "parameters": {"split": False}},
+            {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "mute"}},
+            {"type": "devices.capabilities.range", "retrievable": False, "reportable": False, "parameters": {"instance": "volume", "random_access": True, "range": {"min": 0, "max": 100, "precision": 1}, "unit": "unit.percent"}}
+        ],
+        "properties": [],
+        "device_info": {"manufacturer": "Windows", "model": "Windows PC", "sw_version": "1.0"}
+    }]
+
+    devices.append(virtual_switch(PREVIOUS_DEVICE_ID, "Kompyuter oldingi trek", "Kompyuter media player: oldingi trek"))
+    devices.append(virtual_switch(NEXT_DEVICE_ID, "Kompyuter keyingi trek", "Kompyuter media player: keyingi trek"))
+    devices.append(virtual_switch(SHUTDOWN_TIMER_DEVICE_ID, "Kompyuter o'chirish taymeri", "Kompyuter o'chirish taymerini boshqarish"))
+
     return jsonify({
         "request_id": request_id(),
         "payload": {
             "user_id": token_data["user_id"],
-            "devices": [{
-                "id": DEVICE_ID,
-                "name": DEVICE_NAME,
-                "description": "Windows kompyuter",
-                "room": "Xona",
-                "type": "devices.types.media_device.tv_box",
-                "status_info": {"reportable": False},
-                "custom_data": {"device": DEVICE_ID},
-                "capabilities": [
-                    {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "pause"}},
-                    {"type": "devices.capabilities.on_off", "retrievable": False, "reportable": False, "parameters": {"split": False}},
-                    {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "mute"}},
-                    {"type": "devices.capabilities.range", "retrievable": False, "reportable": False, "parameters": {"instance": "volume", "random_access": True, "range": {"min": 0, "max": 100, "precision": 1}, "unit": "unit.percent"}}
-                ],
-                "properties": [],
-                "device_info": {"manufacturer": "Windows", "model": "Windows PC", "sw_version": "1.0"}
-            }]
+            "devices": devices
         }
     })
 
@@ -233,7 +263,8 @@ def query_devices():
     online = agent_is_online()
     devices = []
     for device in body.get("devices", []):
-        devices.append({"id": device.get("id", DEVICE_ID), "capabilities": [{"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": online}}]})
+        device_id = device.get("id", DEVICE_ID)
+        devices.append({"id": device_id, "capabilities": [{"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": online if device_id == DEVICE_ID else False}}]})
     return jsonify({"request_id": request_id(), "payload": {"devices": devices}})
 
 
@@ -249,10 +280,41 @@ def device_action():
 
     for device in devices:
         device_id = device.get("id", DEVICE_ID)
+        capabilities = device.get("capabilities", [])
+
+        if device_id == PREVIOUS_DEVICE_ID:
+            with QUEUE_LOCK:
+                COMMAND_QUEUE.append({"command": "previous", "created_at": time.time()})
+            print("Yandex: PREVIOUS TRACK buyrug'i navbatga qo'shildi")
+            return action_response(device_id, "devices.capabilities.on_off", "on", "DONE")
+
+        if device_id == NEXT_DEVICE_ID:
+            with QUEUE_LOCK:
+                COMMAND_QUEUE.append({"command": "next", "created_at": time.time()})
+            print("Yandex: NEXT TRACK buyrug'i navbatga qo'shildi")
+            return action_response(device_id, "devices.capabilities.on_off", "on", "DONE")
+
+        if device_id == SHUTDOWN_TIMER_DEVICE_ID:
+            on_capability = next((c for c in capabilities if c.get("type") == "devices.capabilities.on_off" and c.get("state", {}).get("instance") == "on"), None)
+            if on_capability is None:
+                return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "INVALID_ACTION", "Taymer buyrug'i topilmadi")
+
+            value = on_capability.get("state", {}).get("value")
+            if value is False:
+                if not agent_is_online():
+                    return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "DEVICE_UNREACHABLE", "Windows agent ishlamayapti yoki kompyuter ulanmagan")
+                with QUEUE_LOCK:
+                    COMMAND_QUEUE.append({"command": "shutdown", "created_at": time.time(), "source": "shutdown_timer"})
+                print("Yandex: KOMPYUTER O'CHIRISH TAYMERI -> SHUTDOWN navbatga qo'shildi")
+                return action_response(device_id, "devices.capabilities.on_off", "on", "DONE")
+
+            with QUEUE_LOCK:
+                COMMAND_QUEUE.append({"command": "cancel_shutdown", "created_at": time.time(), "source": "shutdown_timer"})
+            print("Yandex: KOMPYUTER O'CHIRISH TAYMERI -> CANCEL navbatga qo'shildi")
+            return action_response(device_id, "devices.capabilities.on_off", "on", "DONE")
+
         if device_id != DEVICE_ID:
             return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "DEVICE_NOT_FOUND", "Kompyuter qurilmasi topilmadi")
-
-        capabilities = device.get("capabilities", [])
 
         pause_capability = next(
             (
