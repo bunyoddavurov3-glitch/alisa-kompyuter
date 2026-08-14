@@ -215,8 +215,7 @@ def oauth_token():
         if not data:
             return oauth_error("invalid_grant")
         access_token = make_signed_token(
-            "access", data["user_id"], data["scope"],
-            time.time() + 30 * 24 * 60 * 60
+            "access", data["user_id"], data["scope"], time.time() + 30 * 24 * 60 * 60
         )
         return jsonify({"access_token": access_token, "token_type": "Bearer", "expires_in": 2592000})
 
@@ -247,66 +246,15 @@ def get_devices():
                 "status_info": {"reportable": False},
                 "custom_data": {"device": DEVICE_ID},
                 "capabilities": [
-                    {
-                        "type": "devices.capabilities.toggle",
-                        "retrievable": False,
-                        "reportable": False,
-                        "parameters": {"instance": "pause"}
-                    },
-                    {
-                        "type": "devices.capabilities.on_off",
-                        "retrievable": False,
-                        "reportable": False,
-                        "parameters": {"split": False}
-                    },
-                    {
-                        "type": "devices.capabilities.toggle",
-                        "retrievable": False,
-                        "reportable": False,
-                        "parameters": {"instance": "mute"}
-                    },
-                    {
-                        "type": "devices.capabilities.range",
-                        "retrievable": False,
-                        "reportable": False,
-                        "parameters": {
-                            "instance": "volume",
-                            "random_access": True,
-                            "range": {"min": 0, "max": 100, "precision": 1},
-                            "unit": "unit.percent"
-                        }
-                    },
-                    {
-                        "type": "devices.capabilities.range",
-                        "retrievable": False,
-                        "reportable": False,
-                        "parameters": {
-                            "instance": "channel",
-                            "random_access": True,
-                            "range": {"min": 1, "max": 1440, "precision": 1}
-                        }
-                    },
-                    {
-                        "type": "devices.capabilities.mode",
-                        "retrievable": False,
-                        "reportable": False,
-                        "parameters": {
-                            "instance": "program",
-                            "modes": [
-                                {"value": "auto"},
-                                {"value": "one"},
-                                {"value": "two"},
-                                {"value": "three"}
-                            ]
-                        }
-                    }
+                    {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "pause"}},
+                    {"type": "devices.capabilities.on_off", "retrievable": False, "reportable": False, "parameters": {"split": False}},
+                    {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "mute"}},
+                    {"type": "devices.capabilities.range", "retrievable": False, "reportable": False, "parameters": {"instance": "volume", "random_access": True, "range": {"min": 0, "max": 100, "precision": 1}, "unit": "unit.percent"}},
+                    {"type": "devices.capabilities.range", "retrievable": False, "reportable": False, "parameters": {"instance": "channel", "random_access": True, "range": {"min": 1, "max": 1440, "precision": 1}}},
+                    {"type": "devices.capabilities.mode", "retrievable": False, "reportable": False, "parameters": {"instance": "program", "modes": [{"value": "auto"}, {"value": "one"}, {"value": "two"}, {"value": "three"}]}}
                 ],
                 "properties": [],
-                "device_info": {
-                    "manufacturer": "Windows",
-                    "model": "Windows PC",
-                    "sw_version": "1.0"
-                }
+                "device_info": {"manufacturer": "Windows", "model": "Windows PC", "sw_version": "1.0"}
             }]
         }
     })
@@ -321,13 +269,7 @@ def query_devices():
     online = agent_is_online()
     devices = []
     for device in body.get("devices", []):
-        devices.append({
-            "id": device.get("id", DEVICE_ID),
-            "capabilities": [{
-                "type": "devices.capabilities.on_off",
-                "state": {"instance": "on", "value": online}
-            }]
-        })
+        devices.append({"id": device.get("id", DEVICE_ID), "capabilities": [{"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": online}}]})
     return jsonify({"request_id": request_id(), "payload": {"devices": devices}})
 
 
@@ -345,29 +287,13 @@ def device_action():
     for device in devices:
         device_id = device.get("id", DEVICE_ID)
         if device_id != DEVICE_ID:
-            return action_response(
-                device_id,
-                "devices.capabilities.on_off",
-                "on",
-                "ERROR",
-                "DEVICE_NOT_FOUND",
-                "Kompyuter qurilmasi topilmadi"
-            )
+            return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "DEVICE_NOT_FOUND", "Kompyuter qurilmasi topilmadi")
 
         capabilities = device.get("capabilities", [])
-
-        pause_capability = next(
-            (
-                capability for capability in capabilities
-                if capability.get("type") == "devices.capabilities.toggle"
-                and capability.get("state", {}).get("instance") == "pause"
-            ),
-            None
-        )
+        pause_capability = next((capability for capability in capabilities if capability.get("type") == "devices.capabilities.toggle" and capability.get("state", {}).get("instance") == "pause"), None)
         if pause_capability is not None:
             state = pause_capability.get("state", {})
             queue_command("play_pause", value=bool(state.get("value")))
-            print("Yandex: PAUSE buyrug'i ustuvor qilindi", flush=True)
             return action_response(device_id, "devices.capabilities.toggle", "pause", "DONE")
 
         for capability in capabilities:
@@ -380,18 +306,10 @@ def device_action():
             if ctype == "devices.capabilities.on_off" and instance == "on":
                 if value is False:
                     if not agent_is_online():
-                        return action_response(
-                            device_id, ctype, instance, "ERROR",
-                            "DEVICE_UNREACHABLE",
-                            "Windows agent ishlamayapti yoki kompyuter ulanmagan"
-                        )
+                        return action_response(device_id, ctype, instance, "ERROR", "DEVICE_UNREACHABLE", "Windows agent ishlamayapti yoki kompyuter ulanmagan")
                     queue_command("shutdown")
                     return action_response(device_id, ctype, instance, "DONE")
-                return action_response(
-                    device_id, ctype, instance, "ERROR",
-                    "INVALID_ACTION",
-                    "Kompyuterni masofadan yoqish hozircha qo'llab-quvvatlanmaydi"
-                )
+                return action_response(device_id, ctype, instance, "ERROR", "INVALID_ACTION", "Kompyuterni masofadan yoqish hozircha qo'llab-quvvatlanmaydi")
 
             if ctype == "devices.capabilities.toggle" and instance == "mute":
                 queue_command("mute", value=bool(value))
@@ -401,10 +319,7 @@ def device_action():
                 try:
                     amount = float(value)
                 except (TypeError, ValueError):
-                    return action_response(
-                        device_id, ctype, instance, "ERROR",
-                        "INVALID_VALUE", "Ovoz qiymati noto'g'ri"
-                    )
+                    return action_response(device_id, ctype, instance, "ERROR", "INVALID_VALUE", "Ovoz qiymati noto'g'ri")
                 if relative:
                     command = "volume_up" if amount > 0 else "volume_down"
                     count = max(1, min(100, int(round(abs(amount)))))
@@ -414,27 +329,16 @@ def device_action():
                     queue_command("volume_set", percent=percent)
                 return action_response(device_id, ctype, instance, "DONE")
 
-            # Yandex range/channel: we use the numeric input as a shutdown timer
-            # in minutes. This gives the user a keyboard field in the device UI.
             if ctype == "devices.capabilities.range" and instance == "channel":
                 try:
                     minutes = int(round(float(value)))
                 except (TypeError, ValueError):
-                    return action_response(
-                        device_id, ctype, instance, "ERROR",
-                        "INVALID_VALUE", "Taymer qiymati noto'g'ri"
-                    )
+                    return action_response(device_id, ctype, instance, "ERROR", "INVALID_VALUE", "Taymer qiymati noto'g'ri")
                 if not 1 <= minutes <= 1440:
-                    return action_response(
-                        device_id, ctype, instance, "ERROR",
-                        "INVALID_VALUE", "Taymer 1-1440 daqiqa oralig'ida bo'lishi kerak"
-                    )
+                    return action_response(device_id, ctype, instance, "ERROR", "INVALID_VALUE", "Taymer 1-1440 daqiqa oralig'ida bo'lishi kerak")
                 queue_command("shutdown_after", seconds=minutes * 60)
-                print(f"Taymer: {minutes} daqiqadan keyin o'chirish rejalashtirildi", flush=True)
                 return action_response(device_id, ctype, instance, "DONE")
 
-            # The program buttons are kept as a safe bridge to the existing
-            # previous/next agent commands. Yandex controls the visual labels.
             if ctype == "devices.capabilities.mode" and instance == "program":
                 mode = str(value or "")
                 if mode == "two":
@@ -444,30 +348,15 @@ def device_action():
                     queue_command("next")
                     return action_response(device_id, ctype, instance, "DONE")
                 if mode == "one":
-                    # Deliberately do not send a destructive command. The
-                    # channel field above is the safe numeric-input control.
-                    print("Yandex: program=one bosildi, hech qanday xavfli amal bajarilmadi", flush=True)
                     return action_response(device_id, ctype, instance, "DONE")
                 if mode == "auto":
+                    # Auto is the timer-cancel button.
+                    queue_command("cancel_shutdown")
                     return action_response(device_id, ctype, instance, "DONE")
 
-        return action_response(
-            device_id,
-            "devices.capabilities.on_off",
-            "on",
-            "ERROR",
-            "INVALID_ACTION",
-            "Qo'llab-quvvatlanmagan buyruq"
-        )
+        return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "INVALID_ACTION", "Qo'llab-quvvatlanmagan buyruq")
 
-    return action_response(
-        DEVICE_ID,
-        "devices.capabilities.on_off",
-        "on",
-        "ERROR",
-        "INVALID_ACTION",
-        "Qo'llab-quvvatlanmagan buyruq"
-    )
+    return action_response(DEVICE_ID, "devices.capabilities.on_off", "on", "ERROR", "INVALID_ACTION", "Qo'llab-quvvatlanmagan buyruq")
 
 
 @app.route("/agent/poll", methods=["GET"])
@@ -480,12 +369,7 @@ def agent_poll():
         command = COMMAND_QUEUE.popleft() if COMMAND_QUEUE else None
     if command is None:
         return jsonify({"ok": True, "command": None, "agent_online": True})
-
-    response = {
-        "ok": True,
-        "command": command.get("command"),
-        "agent_online": True
-    }
+    response = {"ok": True, "command": command.get("command"), "agent_online": True}
     for key in ("hours", "seconds", "percent", "count", "value"):
         if key in command:
             response[key] = command[key]
@@ -496,25 +380,17 @@ def agent_poll():
 def local_command():
     if not check_agent_secret():
         return jsonify({"ok": False, "error": "Ruxsat berilmadi"}), 401
-
     data = request.get_json(silent=True) or {}
     command = data.get("command")
-    allowed = {
-        "shutdown", "restart", "sleep", "shutdown_after", "cancel_shutdown",
-        "play_pause", "previous", "next", "stop", "mute",
-        "volume_up", "volume_down", "volume_set"
-    }
+    allowed = {"shutdown", "restart", "sleep", "shutdown_after", "cancel_shutdown", "play_pause", "previous", "next", "stop", "mute", "volume_up", "volume_down", "volume_set"}
     if command not in allowed:
         return jsonify({"ok": False, "error": "Noma'lum buyruq"}), 400
-
     item = {"command": command, "created_at": time.time()}
-
     if command == "sleep":
         hours = data.get("hours", 1)
         if hours not in (1, 2):
             return jsonify({"ok": False, "error": "Faqat 1 yoki 2 soat"}), 400
         item["hours"] = hours
-
     elif command == "shutdown_after":
         try:
             seconds = int(data.get("seconds"))
@@ -523,7 +399,6 @@ def local_command():
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "seconds noto'g'ri"}), 400
         item["seconds"] = seconds
-
     elif command == "volume_set":
         try:
             percent = int(data.get("percent"))
@@ -532,14 +407,12 @@ def local_command():
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "percent 0-100 oralig'ida bo'lishi kerak"}), 400
         item["percent"] = percent
-
     elif command in ("volume_up", "volume_down"):
         try:
             count = max(1, min(100, int(data.get("count", 1))))
         except (TypeError, ValueError):
             count = 1
         item["count"] = count
-
     with QUEUE_LOCK:
         COMMAND_QUEUE.append(item)
     return jsonify({"ok": True})
