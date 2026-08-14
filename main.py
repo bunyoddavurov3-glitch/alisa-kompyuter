@@ -27,8 +27,6 @@ COMMAND_QUEUE = deque()
 QUEUE_LOCK = threading.Lock()
 LAST_AGENT_POLL = 0.0
 
-# Timer holatini serverda ham saqlaymiz. Shunda Yandex query orqali
-# foydalanuvchi hozirgi taymer qancha qolganini ko'rishi mumkin.
 TIMER_LOCK = threading.Lock()
 TIMER_UNTIL = None
 TIMER_MINUTES = None
@@ -119,13 +117,7 @@ def action_response(device_id, capability_type, instance, status, error_code=Non
         result["error_code"] = error_code
     if error_message:
         result["error_message"] = error_message
-    return jsonify({
-        "request_id": request_id(),
-        "payload": {"devices": [{"id": device_id, "capabilities": [{
-            "type": capability_type,
-            "state": {"instance": instance, "action_result": result}
-        }]}]}
-    })
+    return jsonify({"request_id": request_id(), "payload": {"devices": [{"id": device_id, "capabilities": [{"type": capability_type, "state": {"instance": instance, "action_result": result}}]}]}})
 
 
 def queue_command(command, **extra):
@@ -140,7 +132,7 @@ def set_timer(minutes):
     global TIMER_UNTIL, TIMER_MINUTES
     with TIMER_LOCK:
         TIMER_MINUTES = int(minutes)
-        TIMER_UNTIL = time.time() + (int(minutes) * 60)
+        TIMER_UNTIL = time.time() + int(minutes) * 60
 
 
 def cancel_timer():
@@ -151,12 +143,15 @@ def cancel_timer():
 
 
 def timer_state():
+    global TIMER_UNTIL, TIMER_MINUTES
     with TIMER_LOCK:
         if TIMER_UNTIL is None:
             return None, None
         remaining = max(0, int(TIMER_UNTIL - time.time()))
         if remaining <= 0:
-            return None, 0
+            TIMER_UNTIL = None
+            TIMER_MINUTES = None
+            return None, None
         return remaining, TIMER_MINUTES
 
 
@@ -168,14 +163,7 @@ def home():
 @app.route("/health", methods=["GET"])
 def health():
     remaining, minutes = timer_state()
-    return jsonify({
-        "status": "ok",
-        "device": DEVICE_ID,
-        "agent_online": agent_is_online(),
-        "timer_active": remaining is not None,
-        "timer_remaining_seconds": remaining or 0,
-        "timer_minutes": minutes or 0
-    })
+    return jsonify({"status": "ok", "device": DEVICE_ID, "agent_online": agent_is_online(), "timer_active": remaining is not None, "timer_remaining_seconds": remaining or 0, "timer_minutes": minutes or 0})
 
 
 @app.route("/oauth/authorize", methods=["GET"])
@@ -190,12 +178,7 @@ def oauth_authorize():
     requested_scope = request.args.get("scope", "")
     state = request.args.get("state", "")
     code = make_code()
-    AUTH_CODES[code] = {
-        "client_id": CLIENT_ID,
-        "scope": requested_scope,
-        "redirect_uri": redirect_uri,
-        "created_at": time.time()
-    }
+    AUTH_CODES[code] = {"client_id": CLIENT_ID, "scope": requested_scope, "redirect_uri": redirect_uri, "created_at": time.time()}
     params = {"code": code, "client_id": CLIENT_ID, "scope": requested_scope}
     if state:
         params["state"] = state
@@ -227,35 +210,20 @@ def oauth_token():
         access_expires = time.time() + 30 * 24 * 60 * 60
         access_token = make_signed_token("access", user_id, scope, access_expires)
         refresh_token = make_signed_token("refresh", user_id, scope, time.time() + 180 * 24 * 60 * 60)
-        ACCESS_TOKENS[access_token] = {
-            "user_id": user_id,
-            "scope": scope,
-            "expires_at": access_expires
-        }
+        ACCESS_TOKENS[access_token] = {"user_id": user_id, "scope": scope, "expires_at": access_expires}
         REFRESH_TOKENS[refresh_token] = {"user_id": user_id, "scope": scope}
-        return jsonify({
-            "access_token": access_token,
-            "token_type": "Bearer",
-            "expires_in": 2592000,
-            "refresh_token": refresh_token
-        })
+        return jsonify({"access_token": access_token, "token_type": "Bearer", "expires_in": 2592000, "refresh_token": refresh_token})
 
     if grant_type == "refresh_token":
         refresh_token = request.form.get("refresh_token", "")
         signed = verify_signed_token(refresh_token, "refresh")
         if signed:
-            access_token = make_signed_token(
-                "access", signed["user_id"], signed.get("scope", ""),
-                time.time() + 30 * 24 * 60 * 60
-            )
+            access_token = make_signed_token("access", signed["user_id"], signed.get("scope", ""), time.time() + 30 * 24 * 60 * 60)
             return jsonify({"access_token": access_token, "token_type": "Bearer", "expires_in": 2592000})
         data = REFRESH_TOKENS.get(refresh_token)
         if not data:
             return oauth_error("invalid_grant")
-        access_token = make_signed_token(
-            "access", data["user_id"], data["scope"],
-            time.time() + 30 * 24 * 60 * 60
-        )
+        access_token = make_signed_token("access", data["user_id"], data["scope"], time.time() + 30 * 24 * 60 * 60)
         return jsonify({"access_token": access_token, "token_type": "Bearer", "expires_in": 2592000})
 
     return oauth_error("unsupported_grant_type")
@@ -271,7 +239,6 @@ def get_devices():
     ok, token_data = check_access_token()
     if not ok:
         return yandex_unauthorized()
-
     return jsonify({
         "request_id": request_id(),
         "payload": {
@@ -288,12 +255,12 @@ def get_devices():
                     {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "pause"}},
                     {"type": "devices.capabilities.on_off", "retrievable": False, "reportable": False, "parameters": {"split": False}},
                     {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "mute"}},
-                    {"type": "devices.capabilities.range", "retrievable": False, "reportable": False, "parameters": {"instance": "volume", "random_access": True, "range": {"min": 0, "max": 100, "precision": 1}, "unit": "unit.percent"}},
-                    {"type": "devices.capabilities.range", "retrievable": False, "reportable": False, "parameters": {"instance": "channel", "random_access": True, "range": {"min": 1, "max": 1440, "precision": 1}}},
-                    {"type": "devices.capabilities.mode", "retrievable": False, "reportable": False, "parameters": {"instance": "program", "modes": [{"value": "auto"}, {"value": "one"}, {"value": "two"}, {"value": "three"}]}}
+                    {"type": "devices.capabilities.range", "retrievable": True, "reportable": False, "parameters": {"instance": "volume", "random_access": True, "range": {"min": 0, "max": 100, "precision": 1}, "unit": "unit.percent"}},
+                    {"type": "devices.capabilities.range", "retrievable": True, "reportable": False, "parameters": {"instance": "channel", "random_access": True, "range": {"min": 1, "max": 1440, "precision": 1}}},
+                    {"type": "devices.capabilities.mode", "retrievable": False, "reportable": False, "parameters": {"instance": "program", "modes": [{"value": "auto"}, {"value": "▶️⏸️"}, {"value": "⏮️"}, {"value": "⏭️"}]}}
                 ],
                 "properties": [],
-                "device_info": {"manufacturer": "Windows", "model": "Windows PC", "sw_version": "1.1"}
+                "device_info": {"manufacturer": "Windows", "model": "Windows PC", "sw_version": "1.2"}
             }]
         }
     })
@@ -309,22 +276,11 @@ def query_devices():
     remaining, minutes = timer_state()
     devices = []
     for device in body.get("devices", []):
-        capabilities = [
-            {"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": online}}
-        ]
-        # Query holatida taymerning qolgan sekundlarini ham qaytaramiz.
-        # Yandex buni log/state oynasida ko'rsatishi mumkin; asosiy timer input
-        # esa avvalgidek Kanal orqali ishlaydi.
+        capabilities = [{"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": online}}]
         if remaining is not None:
-            capabilities.append({
-                "type": "devices.capabilities.range",
-                "state": {"instance": "channel", "value": max(1, int((remaining + 59) / 60))}
-            })
+            capabilities.append({"type": "devices.capabilities.range", "state": {"instance": "channel", "value": max(1, int((remaining + 59) / 60))}})
         else:
-            capabilities.append({
-                "type": "devices.capabilities.range",
-                "state": {"instance": "channel", "value": 0}
-            })
+            capabilities.append({"type": "devices.capabilities.range", "state": {"instance": "channel", "value": 0}})
         devices.append({"id": device.get("id", DEVICE_ID), "capabilities": capabilities})
     return jsonify({"request_id": request_id(), "payload": {"devices": devices}})
 
@@ -334,7 +290,6 @@ def device_action():
     ok, _ = check_access_token()
     if not ok:
         return yandex_unauthorized()
-
     body = request.get_json(silent=True) or {}
     devices = body.get("payload", {}).get("devices", [])
     if not devices:
@@ -346,7 +301,7 @@ def device_action():
             return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "DEVICE_NOT_FOUND", "Kompyuter qurilmasi topilmadi")
 
         capabilities = device.get("capabilities", [])
-        pause_capability = next((capability for capability in capabilities if capability.get("type") == "devices.capabilities.toggle" and capability.get("state", {}).get("instance") == "pause"), None)
+        pause_capability = next((c for c in capabilities if c.get("type") == "devices.capabilities.toggle" and c.get("state", {}).get("instance") == "pause"), None)
         if pause_capability is not None:
             state = pause_capability.get("state", {})
             queue_command("play_pause", value=bool(state.get("value")))
@@ -390,31 +345,28 @@ def device_action():
                     minutes = int(round(float(value)))
                 except (TypeError, ValueError):
                     return action_response(device_id, ctype, instance, "ERROR", "INVALID_VALUE", "Taymer qiymati noto'g'ri")
-                # 0 — taymerni bekor qilish uchun xavfsiz qiymat.
-                if minutes == 0:
-                    cancel_timer()
-                    queue_command("cancel_shutdown")
-                    return action_response(device_id, ctype, instance, "DONE")
                 if not 1 <= minutes <= 1440:
                     return action_response(device_id, ctype, instance, "ERROR", "INVALID_VALUE", "Taymer 1-1440 daqiqa oralig'ida bo'lishi kerak")
                 set_timer(minutes)
                 queue_command("shutdown_after", seconds=minutes * 60)
+                print(f"Taymer o'rnatildi: {minutes} daqiqa", flush=True)
                 return action_response(device_id, ctype, instance, "DONE")
 
             if ctype == "devices.capabilities.mode" and instance == "program":
                 mode = str(value or "")
-                if mode == "two":
+                if mode in ("▶️⏸️", "one", "play_pause"):
+                    queue_command("play_pause")
+                    return action_response(device_id, ctype, instance, "DONE")
+                if mode in ("⏮️", "two", "previous"):
                     queue_command("previous")
                     return action_response(device_id, ctype, instance, "DONE")
-                if mode == "three":
+                if mode in ("⏭️", "three", "next"):
                     queue_command("next")
-                    return action_response(device_id, ctype, instance, "DONE")
-                if mode == "one":
-                    # Birinchi mode tugmasi hozircha alohida amal bajarmaydi.
                     return action_response(device_id, ctype, instance, "DONE")
                 if mode == "auto":
                     cancel_timer()
                     queue_command("cancel_shutdown")
+                    print("Taymer bekor qilindi", flush=True)
                     return action_response(device_id, ctype, instance, "DONE")
 
         return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "INVALID_ACTION", "Qo'llab-quvvatlanmagan buyruq")
@@ -461,7 +413,6 @@ def local_command():
                 raise ValueError
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "seconds noto'g'ri"}), 400
-        set_timer(max(1, int((seconds + 59) / 60)))
         item["seconds"] = seconds
     elif command == "cancel_shutdown":
         cancel_timer()
@@ -475,10 +426,9 @@ def local_command():
         item["percent"] = percent
     elif command in ("volume_up", "volume_down"):
         try:
-            count = max(1, min(100, int(data.get("count", 1))))
+            item["count"] = max(1, min(100, int(data.get("count", 1))))
         except (TypeError, ValueError):
-            count = 1
-        item["count"] = count
+            item["count"] = 1
     with QUEUE_LOCK:
         COMMAND_QUEUE.append(item)
     return jsonify({"ok": True})
@@ -486,7 +436,6 @@ def local_command():
 
 @app.route("/v1.0/user/unlink", methods=["POST"])
 def unlink():
-    cancel_timer()
     return jsonify({"request_id": request_id()})
 
 
