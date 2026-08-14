@@ -27,6 +27,12 @@ COMMAND_QUEUE = deque()
 QUEUE_LOCK = threading.Lock()
 LAST_AGENT_POLL = 0.0
 
+# Timer holatini serverda ham saqlaymiz. Shunda Yandex query orqali
+# foydalanuvchi hozirgi taymer qancha qolganini ko'rishi mumkin.
+TIMER_LOCK = threading.Lock()
+TIMER_UNTIL = None
+TIMER_MINUTES = None
+
 
 def make_code():
     return secrets.token_urlsafe(32)
@@ -130,6 +136,30 @@ def queue_command(command, **extra):
     print(f"Yandex: {command} buyrug'i navbatga qo'shildi", flush=True)
 
 
+def set_timer(minutes):
+    global TIMER_UNTIL, TIMER_MINUTES
+    with TIMER_LOCK:
+        TIMER_MINUTES = int(minutes)
+        TIMER_UNTIL = time.time() + (int(minutes) * 60)
+
+
+def cancel_timer():
+    global TIMER_UNTIL, TIMER_MINUTES
+    with TIMER_LOCK:
+        TIMER_UNTIL = None
+        TIMER_MINUTES = None
+
+
+def timer_state():
+    with TIMER_LOCK:
+        if TIMER_UNTIL is None:
+            return None, None
+        remaining = max(0, int(TIMER_UNTIL - time.time()))
+        if remaining <= 0:
+            return None, 0
+        return remaining, TIMER_MINUTES
+
+
 @app.route("/", methods=["GET", "HEAD"])
 def home():
     return "Alisa Kompyuter serveri ishlayapti", 200
@@ -137,7 +167,15 @@ def home():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "device": DEVICE_ID, "agent_online": agent_is_online()})
+    remaining, minutes = timer_state()
+    return jsonify({
+        "status": "ok",
+        "device": DEVICE_ID,
+        "agent_online": agent_is_online(),
+        "timer_active": remaining is not None,
+        "timer_remaining_seconds": remaining or 0,
+        "timer_minutes": minutes or 0
+    })
 
 
 @app.route("/oauth/authorize", methods=["GET"])
@@ -215,7 +253,8 @@ def oauth_token():
         if not data:
             return oauth_error("invalid_grant")
         access_token = make_signed_token(
-            "access", data["user_id"], data["scope"], time.time() + 30 * 24 * 60 * 60
+            "access", data["user_id"], data["scope"],
+            time.time() + 30 * 24 * 60 * 60
         )
         return jsonify({"access_token": access_token, "token_type": "Bearer", "expires_in": 2592000})
 
@@ -254,7 +293,7 @@ def get_devices():
                     {"type": "devices.capabilities.mode", "retrievable": False, "reportable": False, "parameters": {"instance": "program", "modes": [{"value": "auto"}, {"value": "one"}, {"value": "two"}, {"value": "three"}]}}
                 ],
                 "properties": [],
-                "device_info": {"manufacturer": "Windows", "model": "Windows PC", "sw_version": "1.0"}
+                "device_info": {"manufacturer": "Windows", "model": "Windows PC", "sw_version": "1.1"}
             }]
         }
     })
@@ -267,9 +306,26 @@ def query_devices():
         return yandex_unauthorized()
     body = request.get_json(silent=True) or {}
     online = agent_is_online()
+    remaining, minutes = timer_state()
     devices = []
     for device in body.get("devices", []):
-        devices.append({"id": device.get("id", DEVICE_ID), "capabilities": [{"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": online}}]})
+        capabilities = [
+            {"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": online}}
+        ]
+        # Query holatida taymerning qolgan sekundlarini ham qaytaramiz.
+        # Yandex buni log/state oynasida ko'rsatishi mumkin; asosiy timer input
+        # esa avvalgidek Kanal orqali ishlaydi.
+        if remaining is not None:
+            capabilities.append({
+                "type": "devices.capabilities.range",
+                "state": {"instance": "channel", "value": max(1, int((remaining + 59) / 60))}
+            })
+        else:
+            capabilities.append({
+                "type": "devices.capabilities.range",
+                "state": {"instance": "channel", "value": 0}
+            })
+        devices.append({"id": device.get("id", DEVICE_ID), "capabilities": capabilities})
     return jsonify({"request_id": request_id(), "payload": {"devices": devices}})
 
 
@@ -334,8 +390,14 @@ def device_action():
                     minutes = int(round(float(value)))
                 except (TypeError, ValueError):
                     return action_response(device_id, ctype, instance, "ERROR", "INVALID_VALUE", "Taymer qiymati noto'g'ri")
+                # 0 — taymerni bekor qilish uchun xavfsiz qiymat.
+                if minutes == 0:
+                    cancel_timer()
+                    queue_command("cancel_shutdown")
+                    return action_response(device_id, ctype, instance, "DONE")
                 if not 1 <= minutes <= 1440:
                     return action_response(device_id, ctype, instance, "ERROR", "INVALID_VALUE", "Taymer 1-1440 daqiqa oralig'ida bo'lishi kerak")
+                set_timer(minutes)
                 queue_command("shutdown_after", seconds=minutes * 60)
                 return action_response(device_id, ctype, instance, "DONE")
 
@@ -348,9 +410,10 @@ def device_action():
                     queue_command("next")
                     return action_response(device_id, ctype, instance, "DONE")
                 if mode == "one":
+                    # Birinchi mode tugmasi hozircha alohida amal bajarmaydi.
                     return action_response(device_id, ctype, instance, "DONE")
                 if mode == "auto":
-                    # Auto is the timer-cancel button.
+                    cancel_timer()
                     queue_command("cancel_shutdown")
                     return action_response(device_id, ctype, instance, "DONE")
 
@@ -398,7 +461,10 @@ def local_command():
                 raise ValueError
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "seconds noto'g'ri"}), 400
+        set_timer(max(1, int((seconds + 59) / 60)))
         item["seconds"] = seconds
+    elif command == "cancel_shutdown":
+        cancel_timer()
     elif command == "volume_set":
         try:
             percent = int(data.get("percent"))
@@ -420,6 +486,7 @@ def local_command():
 
 @app.route("/v1.0/user/unlink", methods=["POST"])
 def unlink():
+    cancel_timer()
     return jsonify({"request_id": request_id()})
 
 
