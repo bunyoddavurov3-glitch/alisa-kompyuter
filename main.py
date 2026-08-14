@@ -27,14 +27,11 @@ COMMAND_QUEUE = deque()
 QUEUE_LOCK = threading.Lock()
 LAST_AGENT_POLL = 0.0
 
-# O'chirish taymerining ilovadagi holati.
-# Yandex Smart Home custom nomli mode instance'larni qabul qilmaydi,
-# shuning uchun valid "program" capability ichida 4 ta rejim ishlatiladi:
-# auto = bekor qilish, one = 30 daqiqa, two = 1 soat, three = 2 soat.
 TIMER_LOCK = threading.Lock()
 SHUTDOWN_TIMER_MODE = "auto"
 SHUTDOWN_TIMER_DEADLINE = None
 
+# Tayyor tugmalar: 30 daqiqa, 1 soat, 2 soat.
 TIMER_SECONDS = {
     "one": 30 * 60,
     "two": 60 * 60,
@@ -131,7 +128,6 @@ def action_response(device_id, capability_type, instance, status, error_code=Non
 
 
 def get_shutdown_timer_mode():
-    """Ilovaga joriy o'chirish taymeri holatini qaytaradi."""
     global SHUTDOWN_TIMER_MODE, SHUTDOWN_TIMER_DEADLINE
     with TIMER_LOCK:
         if SHUTDOWN_TIMER_DEADLINE is not None and time.time() >= SHUTDOWN_TIMER_DEADLINE:
@@ -141,12 +137,18 @@ def get_shutdown_timer_mode():
 
 
 def set_shutdown_timer(mode):
-    """Yandex mode qiymatini ichki timer holatiga o'tkazadi."""
     global SHUTDOWN_TIMER_MODE, SHUTDOWN_TIMER_DEADLINE
     with TIMER_LOCK:
         SHUTDOWN_TIMER_MODE = mode
         seconds = TIMER_SECONDS.get(mode)
         SHUTDOWN_TIMER_DEADLINE = time.time() + seconds if seconds else None
+
+
+def set_custom_shutdown_timer(minutes):
+    global SHUTDOWN_TIMER_MODE, SHUTDOWN_TIMER_DEADLINE
+    with TIMER_LOCK:
+        SHUTDOWN_TIMER_MODE = "custom"
+        SHUTDOWN_TIMER_DEADLINE = time.time() + (minutes * 60)
 
 
 @app.route("/", methods=["GET", "HEAD"])
@@ -262,6 +264,16 @@ def get_devices():
                                 {"value": "three"}
                             ]
                         }
+                    },
+                    {
+                        "type": "devices.capabilities.range",
+                        "retrievable": True,
+                        "reportable": False,
+                        "parameters": {
+                            "instance": "channel",
+                            "random_access": True,
+                            "range": {"min": 1, "max": 1439, "precision": 1}
+                        }
                     }
                 ],
                 "properties": [],
@@ -308,7 +320,7 @@ def device_action():
 
         capabilities = device.get("capabilities", [])
 
-        # Yangi: ilovadagi o'chirish taymeri.
+        # Tayyor taymer tugmalari: bekor qilish / 30 daqiqa / 1 soat / 2 soat.
         timer_capability = next(
             (
                 capability for capability in capabilities
@@ -345,6 +357,42 @@ def device_action():
             print(f"Yandex: O'CHIRISH TAYMERI {daqiqa} daqiqaga o'rnatildi")
             return action_response(device_id, "devices.capabilities.mode", "program", "DONE")
 
+        # Yangi: ilovadagi klaviatura orqali aniq vaqtni daqiqalarda kiritish.
+        # Masalan 83 = 1 soat 23 daqiqa.
+        custom_capability = next(
+            (
+                capability for capability in capabilities
+                if capability.get("type") == "devices.capabilities.range"
+                and capability.get("state", {}).get("instance") == "channel"
+            ),
+            None
+        )
+
+        if custom_capability is not None:
+            state = custom_capability.get("state", {})
+            try:
+                minutes = int(round(float(state.get("value"))))
+            except (TypeError, ValueError):
+                return action_response(device_id, "devices.capabilities.range", "channel", "ERROR", "INVALID_VALUE", "Vaqt qiymati noto'g'ri")
+
+            if not 1 <= minutes <= 1439:
+                return action_response(device_id, "devices.capabilities.range", "channel", "ERROR", "INVALID_VALUE", "Vaqt 1 dan 1439 daqiqagacha bo'lishi kerak")
+
+            if not agent_is_online():
+                return action_response(device_id, "devices.capabilities.range", "channel", "ERROR", "DEVICE_UNREACHABLE", "Windows agent ishlamayapti yoki kompyuter ulanmagan")
+
+            seconds = minutes * 60
+            with QUEUE_LOCK:
+                COMMAND_QUEUE.append({"command": "shutdown_after", "created_at": time.time(), "seconds": seconds})
+            set_custom_shutdown_timer(minutes)
+            soat = minutes // 60
+            daqiqa = minutes % 60
+            if soat:
+                print(f"Yandex: O'CHIRISH TAYMERI {soat} soat {daqiqa} daqiqaga o'rnatildi")
+            else:
+                print(f"Yandex: O'CHIRISH TAYMERI {daqiqa} daqiqaga o'rnatildi")
+            return action_response(device_id, "devices.capabilities.range", "channel", "DONE")
+
         pause_capability = next(
             (
                 capability for capability in capabilities
@@ -358,11 +406,7 @@ def device_action():
             state = pause_capability.get("state", {})
             value = state.get("value")
             with QUEUE_LOCK:
-                COMMAND_QUEUE.append({
-                    "command": "play_pause",
-                    "created_at": time.time(),
-                    "value": bool(value)
-                })
+                COMMAND_QUEUE.append({"command": "play_pause", "created_at": time.time(), "value": bool(value)})
             print("Yandex: PAUSE buyrug'i ustuvor qilib navbatga qo'shildi")
             return action_response(device_id, "devices.capabilities.toggle", "pause", "DONE")
 
@@ -481,7 +525,7 @@ if __name__ == "__main__":
     print(f"Port: {port}")
     print("Windows agent: /agent/poll")
     print("Yandex: /v1.0/user/devices/action")
-    print("O'chirish taymeri: program mode -> auto/1/2/3")
+    print("O'chirish taymeri: tayyor + aniq daqiqalar")
     print("Til: O'zbekcha")
     print("=" * 60)
     app.run(host="0.0.0.0", port=port, debug=False)
