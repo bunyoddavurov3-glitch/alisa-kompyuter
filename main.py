@@ -27,6 +27,20 @@ COMMAND_QUEUE = deque()
 QUEUE_LOCK = threading.Lock()
 LAST_AGENT_POLL = 0.0
 
+# O'chirish taymerining ilovadagi holati.
+# Yandex Smart Home custom nomli mode instance'larni qabul qilmaydi,
+# shuning uchun valid "program" capability ichida 4 ta rejim ishlatiladi:
+# auto = bekor qilish, one = 30 daqiqa, two = 1 soat, three = 2 soat.
+TIMER_LOCK = threading.Lock()
+SHUTDOWN_TIMER_MODE = "auto"
+SHUTDOWN_TIMER_DEADLINE = None
+
+TIMER_SECONDS = {
+    "one": 30 * 60,
+    "two": 60 * 60,
+    "three": 2 * 60 * 60,
+}
+
 
 def make_code():
     return secrets.token_urlsafe(32)
@@ -114,6 +128,25 @@ def action_response(device_id, capability_type, instance, status, error_code=Non
     if error_message:
         result["error_message"] = error_message
     return jsonify({"request_id": request_id(), "payload": {"devices": [{"id": device_id, "capabilities": [{"type": capability_type, "state": {"instance": instance, "action_result": result}}]}]}})
+
+
+def get_shutdown_timer_mode():
+    """Ilovaga joriy o'chirish taymeri holatini qaytaradi."""
+    global SHUTDOWN_TIMER_MODE, SHUTDOWN_TIMER_DEADLINE
+    with TIMER_LOCK:
+        if SHUTDOWN_TIMER_DEADLINE is not None and time.time() >= SHUTDOWN_TIMER_DEADLINE:
+            SHUTDOWN_TIMER_MODE = "auto"
+            SHUTDOWN_TIMER_DEADLINE = None
+        return SHUTDOWN_TIMER_MODE
+
+
+def set_shutdown_timer(mode):
+    """Yandex mode qiymatini ichki timer holatiga o'tkazadi."""
+    global SHUTDOWN_TIMER_MODE, SHUTDOWN_TIMER_DEADLINE
+    with TIMER_LOCK:
+        SHUTDOWN_TIMER_MODE = mode
+        seconds = TIMER_SECONDS.get(mode)
+        SHUTDOWN_TIMER_DEADLINE = time.time() + seconds if seconds else None
 
 
 @app.route("/", methods=["GET", "HEAD"])
@@ -215,7 +248,21 @@ def get_devices():
                     {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "pause"}},
                     {"type": "devices.capabilities.on_off", "retrievable": False, "reportable": False, "parameters": {"split": False}},
                     {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "mute"}},
-                    {"type": "devices.capabilities.range", "retrievable": False, "reportable": False, "parameters": {"instance": "volume", "random_access": True, "range": {"min": 0, "max": 100, "precision": 1}, "unit": "unit.percent"}}
+                    {"type": "devices.capabilities.range", "retrievable": False, "reportable": False, "parameters": {"instance": "volume", "random_access": True, "range": {"min": 0, "max": 100, "precision": 1}, "unit": "unit.percent"}},
+                    {
+                        "type": "devices.capabilities.mode",
+                        "retrievable": True,
+                        "reportable": False,
+                        "parameters": {
+                            "instance": "program",
+                            "modes": [
+                                {"value": "auto"},
+                                {"value": "one"},
+                                {"value": "two"},
+                                {"value": "three"}
+                            ]
+                        }
+                    }
                 ],
                 "properties": [],
                 "device_info": {"manufacturer": "Windows", "model": "Windows PC", "sw_version": "1.0"}
@@ -231,9 +278,16 @@ def query_devices():
         return yandex_unauthorized()
     body = request.get_json(silent=True) or {}
     online = agent_is_online()
+    timer_mode = get_shutdown_timer_mode()
     devices = []
     for device in body.get("devices", []):
-        devices.append({"id": device.get("id", DEVICE_ID), "capabilities": [{"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": online}}]})
+        devices.append({
+            "id": device.get("id", DEVICE_ID),
+            "capabilities": [
+                {"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": online}},
+                {"type": "devices.capabilities.mode", "state": {"instance": "program", "value": timer_mode}}
+            ]
+        })
     return jsonify({"request_id": request_id(), "payload": {"devices": devices}})
 
 
@@ -253,6 +307,43 @@ def device_action():
             return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "DEVICE_NOT_FOUND", "Kompyuter qurilmasi topilmadi")
 
         capabilities = device.get("capabilities", [])
+
+        # Yangi: ilovadagi o'chirish taymeri.
+        timer_capability = next(
+            (
+                capability for capability in capabilities
+                if capability.get("type") == "devices.capabilities.mode"
+                and capability.get("state", {}).get("instance") == "program"
+            ),
+            None
+        )
+
+        if timer_capability is not None:
+            state = timer_capability.get("state", {})
+            mode = state.get("value")
+            seconds = TIMER_SECONDS.get(mode)
+
+            if mode == "auto":
+                if not agent_is_online():
+                    return action_response(device_id, "devices.capabilities.mode", "program", "ERROR", "DEVICE_UNREACHABLE", "Windows agent ishlamayapti yoki kompyuter ulanmagan")
+                with QUEUE_LOCK:
+                    COMMAND_QUEUE.append({"command": "cancel_shutdown", "created_at": time.time()})
+                set_shutdown_timer("auto")
+                print("Yandex: O'CHIRISH TAYMERI BEKOR QILINDI")
+                return action_response(device_id, "devices.capabilities.mode", "program", "DONE")
+
+            if seconds is None:
+                return action_response(device_id, "devices.capabilities.mode", "program", "ERROR", "INVALID_VALUE", "O'chirish taymeri qiymati noto'g'ri")
+
+            if not agent_is_online():
+                return action_response(device_id, "devices.capabilities.mode", "program", "ERROR", "DEVICE_UNREACHABLE", "Windows agent ishlamayapti yoki kompyuter ulanmagan")
+
+            with QUEUE_LOCK:
+                COMMAND_QUEUE.append({"command": "shutdown_after", "created_at": time.time(), "seconds": seconds})
+            set_shutdown_timer(mode)
+            daqiqa = seconds // 60
+            print(f"Yandex: O'CHIRISH TAYMERI {daqiqa} daqiqaga o'rnatildi")
+            return action_response(device_id, "devices.capabilities.mode", "program", "DONE")
 
         pause_capability = next(
             (
@@ -390,6 +481,7 @@ if __name__ == "__main__":
     print(f"Port: {port}")
     print("Windows agent: /agent/poll")
     print("Yandex: /v1.0/user/devices/action")
+    print("O'chirish taymeri: program mode -> auto/1/2/3")
     print("Til: O'zbekcha")
     print("=" * 60)
     app.run(host="0.0.0.0", port=port, debug=False)
