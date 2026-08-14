@@ -19,9 +19,6 @@ TOKEN_SECRET = (os.environ.get("OAUTH_TOKEN_SECRET") or AGENT_SECRET or CLIENT_S
 
 DEVICE_ID = "windows_pc"
 DEVICE_NAME = "Kompyuter"
-PREVIOUS_DEVICE_ID = "windows_pc_previous_track"
-NEXT_DEVICE_ID = "windows_pc_next_track"
-SHUTDOWN_TIMER_DEVICE_ID = "windows_pc_shutdown_timer"
 
 AUTH_CODES = {}
 ACCESS_TOKENS = {}
@@ -58,42 +55,72 @@ def _unb64(value: str) -> bytes:
 def make_signed_token(kind, user_id, scope, expires_at):
     if not TOKEN_SECRET:
         return make_legacy_token()
-    payload = {"kind": kind, "user_id": user_id, "scope": scope or "", "exp": int(expires_at), "v": 1}
-    raw = _b64(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-    signature = hmac.new(TOKEN_SECRET, raw.encode("ascii"), hashlib.sha256).digest()
+
+    payload = {
+        "kind": kind,
+        "user_id": user_id,
+        "scope": scope or "",
+        "exp": int(expires_at),
+        "v": 1,
+    }
+    raw = _b64(
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    )
+    signature = hmac.new(
+        TOKEN_SECRET, raw.encode("ascii"), hashlib.sha256
+    ).digest()
     return raw + "." + _b64(signature)
 
 
 def verify_signed_token(token, expected_kind):
     if not TOKEN_SECRET or not token or "." not in token:
         return None
+
     try:
         raw, signature = token.rsplit(".", 1)
-        expected = hmac.new(TOKEN_SECRET, raw.encode("ascii"), hashlib.sha256).digest()
+        expected = hmac.new(
+            TOKEN_SECRET, raw.encode("ascii"), hashlib.sha256
+        ).digest()
+
         if not hmac.compare_digest(expected, _unb64(signature)):
             return None
+
         payload = json.loads(_unb64(raw).decode("utf-8"))
-        if payload.get("kind") != expected_kind or int(payload.get("exp", 0)) <= int(time.time()) or not payload.get("user_id"):
+
+        if (
+            payload.get("kind") != expected_kind
+            or int(payload.get("exp", 0)) <= int(time.time())
+            or not payload.get("user_id")
+        ):
             return None
+
         return payload
+
     except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
         return None
 
 
 def check_access_token():
     header = request.headers.get("Authorization", "")
+
     if not header.startswith("Bearer "):
         return False, None
+
     token = header[7:].strip()
+
     signed = verify_signed_token(token, "access")
     if signed:
         return True, signed
+
     data = ACCESS_TOKENS.get(token)
+
     if not data:
         return False, None
+
     if time.time() > data["expires_at"]:
         ACCESS_TOKENS.pop(token, None)
         return False, None
+
     return True, data
 
 
@@ -107,36 +134,51 @@ def oauth_error(message, status=400):
 
 
 def yandex_unauthorized():
-    return jsonify({"error_code": "UNAUTHORIZED", "error_message": "Invalid access token"}), 401
+    return jsonify(
+        {
+            "error_code": "UNAUTHORIZED",
+            "error_message": "Invalid access token",
+        }
+    ), 401
 
 
-def action_response(device_id, capability_type, instance, status, error_code=None, error_message=None):
+def action_response(
+    device_id,
+    capability_type,
+    instance,
+    status,
+    error_code=None,
+    error_message=None,
+):
     result = {"status": status}
+
     if error_code:
         result["error_code"] = error_code
+
     if error_message:
         result["error_message"] = error_message
-    return jsonify({"request_id": request_id(), "payload": {"devices": [{"id": device_id, "capabilities": [{"type": capability_type, "state": {"instance": instance, "action_result": result}}]}]}})
 
-
-def virtual_switch(device_id, name, description):
-    return {
-        "id": device_id,
-        "name": name,
-        "description": description,
-        "room": "Xona",
-        "type": "devices.types.switch",
-        "status_info": {"reportable": False},
-        "custom_data": {"device": device_id},
-        "capabilities": [{
-            "type": "devices.capabilities.on_off",
-            "retrievable": False,
-            "reportable": False,
-            "parameters": {"split": False}
-        }],
-        "properties": [],
-        "device_info": {"manufacturer": "Windows", "model": "Windows PC control", "sw_version": "1.0"}
-    }
+    return jsonify(
+        {
+            "request_id": request_id(),
+            "payload": {
+                "devices": [
+                    {
+                        "id": device_id,
+                        "capabilities": [
+                            {
+                                "type": capability_type,
+                                "state": {
+                                    "instance": instance,
+                                    "action_result": result,
+                                },
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+    )
 
 
 @app.route("/", methods=["GET", "HEAD"])
@@ -146,26 +188,50 @@ def home():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "device": DEVICE_ID, "agent_online": agent_is_online()})
+    return jsonify(
+        {
+            "status": "ok",
+            "device": DEVICE_ID,
+            "agent_online": agent_is_online(),
+        }
+    )
 
 
 @app.route("/oauth/authorize", methods=["GET"])
 def oauth_authorize():
     if request.args.get("response_type") != "code":
         return oauth_error("unsupported_response_type")
+
     if request.args.get("client_id") != CLIENT_ID:
         return oauth_error("invalid_client", 401)
+
     redirect_uri = request.args.get("redirect_uri")
     if not redirect_uri:
         return oauth_error("invalid_request")
+
     requested_scope = request.args.get("scope", "")
     state = request.args.get("state", "")
+
     code = make_code()
-    AUTH_CODES[code] = {"client_id": CLIENT_ID, "scope": requested_scope, "redirect_uri": redirect_uri, "created_at": time.time()}
-    params = {"code": code, "client_id": CLIENT_ID, "scope": requested_scope}
+
+    AUTH_CODES[code] = {
+        "client_id": CLIENT_ID,
+        "scope": requested_scope,
+        "redirect_uri": redirect_uri,
+        "created_at": time.time(),
+    }
+
+    params = {
+        "code": code,
+        "client_id": CLIENT_ID,
+        "scope": requested_scope,
+    }
+
     if state:
         params["state"] = state
+
     separator = "&" if "?" in redirect_uri else "?"
+
     return redirect(redirect_uri + separator + urlencode(params))
 
 
@@ -174,40 +240,105 @@ def oauth_token():
     grant_type = request.form.get("grant_type", "")
     client_id = request.form.get("client_id", "")
     client_secret = request.form.get("client_secret", "")
+
     if not client_id:
         basic = request.authorization
         if basic:
-            client_id, client_secret = basic.username or "", basic.password or ""
+            client_id = basic.username or ""
+            client_secret = basic.password or ""
+
     if client_id != CLIENT_ID:
         return oauth_error("invalid_client", 401)
+
     if CLIENT_SECRET and client_secret != CLIENT_SECRET:
         return oauth_error("invalid_client", 401)
 
     if grant_type == "authorization_code":
         code = request.form.get("code", "")
         data = AUTH_CODES.pop(code, None)
+
         if not data or time.time() - data["created_at"] > 600:
             return oauth_error("invalid_grant")
+
         user_id = "windows_user"
         scope = data.get("scope", "")
+
         access_expires = time.time() + 30 * 24 * 60 * 60
-        access_token = make_signed_token("access", user_id, scope, access_expires)
-        refresh_token = make_signed_token("refresh", user_id, scope, time.time() + 180 * 24 * 60 * 60)
-        ACCESS_TOKENS[access_token] = {"user_id": user_id, "scope": scope, "expires_at": access_expires}
-        REFRESH_TOKENS[refresh_token] = {"user_id": user_id, "scope": scope}
-        return jsonify({"access_token": access_token, "token_type": "Bearer", "expires_in": 2592000, "refresh_token": refresh_token})
+
+        access_token = make_signed_token(
+            "access",
+            user_id,
+            scope,
+            access_expires,
+        )
+
+        refresh_token = make_signed_token(
+            "refresh",
+            user_id,
+            scope,
+            time.time() + 180 * 24 * 60 * 60,
+        )
+
+        ACCESS_TOKENS[access_token] = {
+            "user_id": user_id,
+            "scope": scope,
+            "expires_at": access_expires,
+        }
+
+        REFRESH_TOKENS[refresh_token] = {
+            "user_id": user_id,
+            "scope": scope,
+        }
+
+        return jsonify(
+            {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": 2592000,
+                "refresh_token": refresh_token,
+            }
+        )
 
     if grant_type == "refresh_token":
         refresh_token = request.form.get("refresh_token", "")
+
         signed = verify_signed_token(refresh_token, "refresh")
+
         if signed:
-            access_token = make_signed_token("access", signed["user_id"], signed.get("scope", ""), time.time() + 30 * 24 * 60 * 60)
-            return jsonify({"access_token": access_token, "token_type": "Bearer", "expires_in": 2592000})
+            access_token = make_signed_token(
+                "access",
+                signed["user_id"],
+                signed.get("scope", ""),
+                time.time() + 30 * 24 * 60 * 60,
+            )
+
+            return jsonify(
+                {
+                    "access_token": access_token,
+                    "token_type": "Bearer",
+                    "expires_in": 2592000,
+                }
+            )
+
         data = REFRESH_TOKENS.get(refresh_token)
+
         if not data:
             return oauth_error("invalid_grant")
-        access_token = make_signed_token("access", data["user_id"], data["scope"], time.time() + 30 * 24 * 60 * 60)
-        return jsonify({"access_token": access_token, "token_type": "Bearer", "expires_in": 2592000})
+
+        access_token = make_signed_token(
+            "access",
+            data["user_id"],
+            data["scope"],
+            time.time() + 30 * 24 * 60 * 60,
+        )
+
+        return jsonify(
+            {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": 2592000,
+            }
+        )
 
     return oauth_error("unsupported_grant_type")
 
@@ -220,123 +351,246 @@ def oauth_refresh():
 @app.route("/v1.0/user/devices", methods=["GET"])
 def get_devices():
     ok, token_data = check_access_token()
+
     if not ok:
         return yandex_unauthorized()
 
-    devices = [{
-        "id": DEVICE_ID,
-        "name": DEVICE_NAME,
-        "description": "Windows kompyuter",
-        "room": "Xona",
-        "type": "devices.types.media_device.tv_box",
-        "status_info": {"reportable": False},
-        "custom_data": {"device": DEVICE_ID},
-        "capabilities": [
-            {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "pause"}},
-            {"type": "devices.capabilities.on_off", "retrievable": False, "reportable": False, "parameters": {"split": False}},
-            {"type": "devices.capabilities.toggle", "retrievable": False, "reportable": False, "parameters": {"instance": "mute"}},
-            {"type": "devices.capabilities.range", "retrievable": False, "reportable": False, "parameters": {"instance": "volume", "random_access": True, "range": {"min": 0, "max": 100, "precision": 1}, "unit": "unit.percent"}}
-        ],
-        "properties": [],
-        "device_info": {"manufacturer": "Windows", "model": "Windows PC", "sw_version": "1.0"}
-    }]
+    # Eslatma:
+    # - volume: ovoz foizini to'g'ridan-to'g'ri berish uchun.
+    # - channel: qo'lda kanal qiymatini kiritish uchun.
+    #   Yandex bu capability orqali keyingi/oldingi kanal ovozli
+    #   buyruqlarini ham qo'llab-quvvatlaydi.
+    #
+    # - program: ilova ichida "Auto", "Trek orqaga", "Trek oldinga"
+    #   kabi 3 ta rejim ko'rsatish uchun ishlatiladi.
+    #
+    # Yandex ilovasidagi aniq ikonka/joylashuvni server majburan
+    # belgilay olmaydi: UI capability turiga qarab Yandex tomonidan
+    # chiziladi.
 
-    devices.append(virtual_switch(PREVIOUS_DEVICE_ID, "Kompyuter oldingi trek", "Kompyuter media player: oldingi trek"))
-    devices.append(virtual_switch(NEXT_DEVICE_ID, "Kompyuter keyingi trek", "Kompyuter media player: keyingi trek"))
-    devices.append(virtual_switch(SHUTDOWN_TIMER_DEVICE_ID, "Kompyuter o'chirish taymeri", "Kompyuter o'chirish taymerini boshqarish"))
+    return jsonify(
+        {
+            "request_id": request_id(),
+            "payload": {
+                "user_id": token_data["user_id"],
+                "devices": [
+                    {
+                        "id": DEVICE_ID,
+                        "name": DEVICE_NAME,
+                        "description": "Windows kompyuter",
+                        "room": "Xona",
+                        "type": "devices.types.media_device.tv_box",
+                        "status_info": {
+                            "reportable": False
+                        },
+                        "custom_data": {
+                            "device": DEVICE_ID
+                        },
+                        "capabilities": [
+                            {
+                                "type": "devices.capabilities.toggle",
+                                "retrievable": False,
+                                "reportable": False,
+                                "parameters": {
+                                    "instance": "pause"
+                                },
+                            },
+                            {
+                                "type": "devices.capabilities.on_off",
+                                "retrievable": False,
+                                "reportable": False,
+                                "parameters": {
+                                    "split": False
+                                },
+                            },
+                            {
+                                "type": "devices.capabilities.toggle",
+                                "retrievable": False,
+                                "reportable": False,
+                                "parameters": {
+                                    "instance": "mute"
+                                },
+                            },
 
-    return jsonify({
-        "request_id": request_id(),
-        "payload": {
-            "user_id": token_data["user_id"],
-            "devices": devices
+                            # Ovoz boshqaruvi — oldingidek qoladi.
+                            {
+                                "type": "devices.capabilities.range",
+                                "retrievable": False,
+                                "reportable": False,
+                                "parameters": {
+                                    "instance": "volume",
+                                    "random_access": True,
+                                    "range": {
+                                        "min": 0,
+                                        "max": 100,
+                                        "precision": 1,
+                                    },
+                                    "unit": "unit.percent",
+                                },
+                            },
+
+                            # Kanal — qo'lda qiymat kiritish va kanal
+                            # oldinga/orqaga ovozli boshqaruvini beradi.
+                            {
+                                "type": "devices.capabilities.range",
+                                "retrievable": False,
+                                "reportable": False,
+                                "parameters": {
+                                    "instance": "channel",
+                                    "random_access": True,
+                                    "range": {
+                                        "min": 0,
+                                        "max": 999,
+                                        "precision": 1,
+                                    },
+                                },
+                            },
+
+                            # Dastur bo'limi.
+                            # Auto — play/pause rejimini avtomatik holatga qaytarish.
+                            # previous — oldingi trek.
+                            # next — keyingi trek.
+                            #
+                            # Muhim: bu mode qiymatlari Yandex UI'da matn
+                            # sifatida ko'rinishi mumkin. Maxsus "oldingi/keyingi
+                            # trek" ikonkasini backend majburlab bera olmaydi.
+                            {
+                                "type": "devices.capabilities.mode",
+                                "retrievable": False,
+                                "reportable": False,
+                                "parameters": {
+                                    "instance": "program",
+                                    "modes": [
+                                        {"value": "auto"},
+                                        {"value": "previous"},
+                                        {"value": "next"},
+                                    ],
+                                },
+                            },
+                        ],
+                        "properties": [],
+                        "device_info": {
+                            "manufacturer": "Windows",
+                            "model": "Windows PC",
+                            "sw_version": "1.0",
+                        },
+                    }
+                ],
+            },
         }
-    })
+    )
 
 
 @app.route("/v1.0/user/devices/query", methods=["POST"])
 def query_devices():
     ok, _ = check_access_token()
+
     if not ok:
         return yandex_unauthorized()
+
     body = request.get_json(silent=True) or {}
     online = agent_is_online()
     devices = []
+
     for device in body.get("devices", []):
-        device_id = device.get("id", DEVICE_ID)
-        devices.append({"id": device_id, "capabilities": [{"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": online if device_id == DEVICE_ID else False}}]})
-    return jsonify({"request_id": request_id(), "payload": {"devices": devices}})
+        devices.append(
+            {
+                "id": device.get("id", DEVICE_ID),
+                "capabilities": [
+                    {
+                        "type": "devices.capabilities.on_off",
+                        "state": {
+                            "instance": "on",
+                            "value": online,
+                        },
+                    }
+                ],
+            }
+        )
+
+    return jsonify(
+        {
+            "request_id": request_id(),
+            "payload": {
+                "devices": devices
+            },
+        }
+    )
 
 
 @app.route("/v1.0/user/devices/action", methods=["POST"])
 def device_action():
     ok, _ = check_access_token()
+
     if not ok:
         return yandex_unauthorized()
+
     body = request.get_json(silent=True) or {}
     devices = body.get("payload", {}).get("devices", [])
+
     if not devices:
-        return jsonify({"request_id": request_id(), "payload": {"devices": []}})
+        return jsonify(
+            {
+                "request_id": request_id(),
+                "payload": {
+                    "devices": []
+                },
+            }
+        )
 
     for device in devices:
         device_id = device.get("id", DEVICE_ID)
-        capabilities = device.get("capabilities", [])
-
-        if device_id == PREVIOUS_DEVICE_ID:
-            with QUEUE_LOCK:
-                COMMAND_QUEUE.append({"command": "previous", "created_at": time.time()})
-            print("Yandex: PREVIOUS TRACK buyrug'i navbatga qo'shildi")
-            return action_response(device_id, "devices.capabilities.on_off", "on", "DONE")
-
-        if device_id == NEXT_DEVICE_ID:
-            with QUEUE_LOCK:
-                COMMAND_QUEUE.append({"command": "next", "created_at": time.time()})
-            print("Yandex: NEXT TRACK buyrug'i navbatga qo'shildi")
-            return action_response(device_id, "devices.capabilities.on_off", "on", "DONE")
-
-        if device_id == SHUTDOWN_TIMER_DEVICE_ID:
-            on_capability = next((c for c in capabilities if c.get("type") == "devices.capabilities.on_off" and c.get("state", {}).get("instance") == "on"), None)
-            if on_capability is None:
-                return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "INVALID_ACTION", "Taymer buyrug'i topilmadi")
-
-            value = on_capability.get("state", {}).get("value")
-            if value is False:
-                if not agent_is_online():
-                    return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "DEVICE_UNREACHABLE", "Windows agent ishlamayapti yoki kompyuter ulanmagan")
-                with QUEUE_LOCK:
-                    COMMAND_QUEUE.append({"command": "shutdown", "created_at": time.time(), "source": "shutdown_timer"})
-                print("Yandex: KOMPYUTER O'CHIRISH TAYMERI -> SHUTDOWN navbatga qo'shildi")
-                return action_response(device_id, "devices.capabilities.on_off", "on", "DONE")
-
-            with QUEUE_LOCK:
-                COMMAND_QUEUE.append({"command": "cancel_shutdown", "created_at": time.time(), "source": "shutdown_timer"})
-            print("Yandex: KOMPYUTER O'CHIRISH TAYMERI -> CANCEL navbatga qo'shildi")
-            return action_response(device_id, "devices.capabilities.on_off", "on", "DONE")
 
         if device_id != DEVICE_ID:
-            return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "DEVICE_NOT_FOUND", "Kompyuter qurilmasi topilmadi")
+            return action_response(
+                device_id,
+                "devices.capabilities.on_off",
+                "on",
+                "ERROR",
+                "DEVICE_NOT_FOUND",
+                "Kompyuter qurilmasi topilmadi",
+            )
 
+        capabilities = device.get("capabilities", [])
+
+        # ---------------------------------------------------------
+        # PAUSE
+        # ---------------------------------------------------------
         pause_capability = next(
             (
-                capability for capability in capabilities
+                capability
+                for capability in capabilities
                 if capability.get("type") == "devices.capabilities.toggle"
                 and capability.get("state", {}).get("instance") == "pause"
             ),
-            None
+            None,
         )
 
         if pause_capability is not None:
             state = pause_capability.get("state", {})
             value = state.get("value")
-            with QUEUE_LOCK:
-                COMMAND_QUEUE.append({
-                    "command": "play_pause",
-                    "created_at": time.time(),
-                    "value": bool(value)
-                })
-            print("Yandex: PAUSE buyrug'i ustuvor qilib navbatga qo'shildi")
-            return action_response(device_id, "devices.capabilities.toggle", "pause", "DONE")
 
+            with QUEUE_LOCK:
+                COMMAND_QUEUE.append(
+                    {
+                        "command": "play_pause",
+                        "created_at": time.time(),
+                        "value": bool(value),
+                    }
+                )
+
+            print("Yandex: PAUSE buyrug'i navbatga qo'shildi")
+
+            return action_response(
+                device_id,
+                "devices.capabilities.toggle",
+                "pause",
+                "DONE",
+            )
+
+        # ---------------------------------------------------------
+        # QOLGAN CAPABILITY'LAR
+        # ---------------------------------------------------------
         for capability in capabilities:
             ctype = capability.get("type")
             state = capability.get("state", {})
@@ -344,108 +598,494 @@ def device_action():
             value = state.get("value")
             relative = state.get("relative", False)
 
+            # -----------------------------------------------------
+            # POWER
+            # -----------------------------------------------------
             if ctype == "devices.capabilities.on_off" and instance == "on":
                 if value is False:
                     if not agent_is_online():
-                        return action_response(device_id, ctype, instance, "ERROR", "DEVICE_UNREACHABLE", "Windows agent ishlamayapti yoki kompyuter ulanmagan")
+                        return action_response(
+                            device_id,
+                            ctype,
+                            instance,
+                            "ERROR",
+                            "DEVICE_UNREACHABLE",
+                            "Windows agent ishlamayapti yoki kompyuter ulanmagan",
+                        )
+
                     with QUEUE_LOCK:
-                        COMMAND_QUEUE.append({"command": "shutdown", "created_at": time.time()})
+                        COMMAND_QUEUE.append(
+                            {
+                                "command": "shutdown",
+                                "created_at": time.time(),
+                            }
+                        )
+
                     print("Yandex: SHUTDOWN buyrug'i navbatga qo'shildi")
-                    return action_response(device_id, ctype, instance, "DONE")
-                return action_response(device_id, ctype, instance, "ERROR", "INVALID_ACTION", "Kompyuterni masofadan yoqish hozircha qo'llab-quvvatlanmaydi")
 
-            if ctype == "devices.capabilities.toggle" and instance == "mute":
+                    return action_response(
+                        device_id,
+                        ctype,
+                        instance,
+                        "DONE",
+                    )
+
+                return action_response(
+                    device_id,
+                    ctype,
+                    instance,
+                    "ERROR",
+                    "INVALID_ACTION",
+                    "Kompyuterni masofadan yoqish hozircha qo'llab-quvvatlanmaydi",
+                )
+
+            # -----------------------------------------------------
+            # MUTE
+            # -----------------------------------------------------
+            if (
+                ctype == "devices.capabilities.toggle"
+                and instance == "mute"
+            ):
                 with QUEUE_LOCK:
-                    COMMAND_QUEUE.append({"command": "mute", "created_at": time.time(), "value": bool(value)})
-                return action_response(device_id, ctype, instance, "DONE")
+                    COMMAND_QUEUE.append(
+                        {
+                            "command": "mute",
+                            "created_at": time.time(),
+                            "value": bool(value),
+                        }
+                    )
 
-            if ctype == "devices.capabilities.range" and instance == "volume":
+                return action_response(
+                    device_id,
+                    ctype,
+                    instance,
+                    "DONE",
+                )
+
+            # -----------------------------------------------------
+            # VOLUME
+            # -----------------------------------------------------
+            if (
+                ctype == "devices.capabilities.range"
+                and instance == "volume"
+            ):
                 try:
                     amount = float(value)
                 except (TypeError, ValueError):
-                    return action_response(device_id, ctype, instance, "ERROR", "INVALID_VALUE", "Ovoz qiymati noto'g'ri")
+                    return action_response(
+                        device_id,
+                        ctype,
+                        instance,
+                        "ERROR",
+                        "INVALID_VALUE",
+                        "Ovoz qiymati noto'g'ri",
+                    )
+
                 if relative:
-                    command = "volume_up" if amount > 0 else "volume_down"
-                    count = max(1, min(100, int(round(abs(amount)))))
+                    command = (
+                        "volume_up"
+                        if amount > 0
+                        else "volume_down"
+                    )
+
+                    count = max(
+                        1,
+                        min(100, int(round(abs(amount))))
+                    )
+
                     with QUEUE_LOCK:
-                        COMMAND_QUEUE.append({"command": command, "created_at": time.time(), "count": count})
+                        COMMAND_QUEUE.append(
+                            {
+                                "command": command,
+                                "created_at": time.time(),
+                                "count": count,
+                            }
+                        )
                 else:
-                    percent = max(0, min(100, int(round(amount))))
+                    percent = max(
+                        0,
+                        min(100, int(round(amount)))
+                    )
+
                     with QUEUE_LOCK:
-                        COMMAND_QUEUE.append({"command": "volume_set", "created_at": time.time(), "percent": percent})
-                return action_response(device_id, ctype, instance, "DONE")
+                        COMMAND_QUEUE.append(
+                            {
+                                "command": "volume_set",
+                                "created_at": time.time(),
+                                "percent": percent,
+                            }
+                        )
 
-        return action_response(device_id, "devices.capabilities.on_off", "on", "ERROR", "INVALID_ACTION", "Qo'llab-quvvatlanmagan buyruq")
+                return action_response(
+                    device_id,
+                    ctype,
+                    instance,
+                    "DONE",
+                )
 
-    return action_response(DEVICE_ID, "devices.capabilities.on_off", "on", "ERROR", "INVALID_ACTION", "Qo'llab-quvvatlanmagan buyruq")
+            # -----------------------------------------------------
+            # CHANNEL
+            # -----------------------------------------------------
+            if (
+                ctype == "devices.capabilities.range"
+                and instance == "channel"
+            ):
+                # Qo'lda kiritilgan kanal soni.
+                if relative:
+                    try:
+                        amount = float(value)
+                    except (TypeError, ValueError):
+                        return action_response(
+                            device_id,
+                            ctype,
+                            instance,
+                            "ERROR",
+                            "INVALID_VALUE",
+                            "Kanal qiymati noto'g'ri",
+                        )
+
+                    if amount > 0:
+                        command = "next"
+                        count = max(
+                            1,
+                            min(100, int(round(abs(amount))))
+                        )
+                    elif amount < 0:
+                        command = "previous"
+                        count = max(
+                            1,
+                            min(100, int(round(abs(amount))))
+                        )
+                    else:
+                        command = "next"
+                        count = 1
+
+                    with QUEUE_LOCK:
+                        COMMAND_QUEUE.append(
+                            {
+                                "command": command,
+                                "created_at": time.time(),
+                                "count": count,
+                            }
+                        )
+
+                    print(
+                        f"Yandex: CHANNEL relative -> {command}, count={count}"
+                    )
+
+                else:
+                    try:
+                        channel = int(round(float(value)))
+                    except (TypeError, ValueError):
+                        return action_response(
+                            device_id,
+                            ctype,
+                            instance,
+                            "ERROR",
+                            "INVALID_VALUE",
+                            "Kanal qiymati noto'g'ri",
+                        )
+
+                    channel = max(0, min(999, channel))
+
+                    with QUEUE_LOCK:
+                        COMMAND_QUEUE.append(
+                            {
+                                "command": "channel_set",
+                                "created_at": time.time(),
+                                "channel": channel,
+                            }
+                        )
+
+                    print(
+                        f"Yandex: CHANNEL {channel} ga o'rnatish buyrug'i navbatga qo'shildi"
+                    )
+
+                return action_response(
+                    device_id,
+                    ctype,
+                    instance,
+                    "DONE",
+                )
+
+            # -----------------------------------------------------
+            # PROGRAM / TREK
+            # -----------------------------------------------------
+            if (
+                ctype == "devices.capabilities.mode"
+                and instance == "program"
+            ):
+                program = str(value or "").lower()
+
+                if program == "auto":
+                    # Auto tugmasi alohida ijro buyrug'ini talab qilmaydi.
+                    # Foydalanuvchi uchun xavfsiz "DONE".
+                    print("Yandex: PROGRAM auto tanlandi")
+
+                    return action_response(
+                        device_id,
+                        ctype,
+                        instance,
+                        "DONE",
+                    )
+
+                if program == "previous":
+                    command = "previous"
+                elif program == "next":
+                    command = "next"
+                else:
+                    return action_response(
+                        device_id,
+                        ctype,
+                        instance,
+                        "ERROR",
+                        "INVALID_VALUE",
+                        "Dastur qiymati qo'llab-quvvatlanmaydi",
+                    )
+
+                with QUEUE_LOCK:
+                    COMMAND_QUEUE.append(
+                        {
+                            "command": command,
+                            "created_at": time.time(),
+                        }
+                    )
+
+                print(
+                    f"Yandex: PROGRAM {program} -> {command}"
+                )
+
+                return action_response(
+                    device_id,
+                    ctype,
+                    instance,
+                    "DONE",
+                )
+
+        return action_response(
+            device_id,
+            "devices.capabilities.on_off",
+            "on",
+            "ERROR",
+            "INVALID_ACTION",
+            "Qo'llab-quvvatlanmagan buyruq",
+        )
+
+    return action_response(
+        DEVICE_ID,
+        "devices.capabilities.on_off",
+        "on",
+        "ERROR",
+        "INVALID_ACTION",
+        "Qo'llab-quvvatlanmagan buyruq",
+    )
 
 
 @app.route("/agent/poll", methods=["GET"])
 def agent_poll():
     global LAST_AGENT_POLL
+
     if not check_agent_secret():
-        return jsonify({"ok": False, "error": "Ruxsat berilmadi"}), 401
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Ruxsat berilmadi",
+            }
+        ), 401
+
     LAST_AGENT_POLL = time.time()
+
     with QUEUE_LOCK:
-        command = COMMAND_QUEUE.popleft() if COMMAND_QUEUE else None
+        command = (
+            COMMAND_QUEUE.popleft()
+            if COMMAND_QUEUE
+            else None
+        )
+
     if command is None:
-        return jsonify({"ok": True, "command": None, "agent_online": True})
-    response = {"ok": True, "command": command.get("command"), "agent_online": True}
-    for key in ("hours", "seconds", "percent", "count", "value"):
+        return jsonify(
+            {
+                "ok": True,
+                "command": None,
+                "agent_online": True,
+            }
+        )
+
+    response = {
+        "ok": True,
+        "command": command.get("command"),
+        "agent_online": True,
+    }
+
+    for key in (
+        "hours",
+        "seconds",
+        "percent",
+        "count",
+        "value",
+        "channel",
+    ):
         if key in command:
             response[key] = command[key]
+
+    print(
+        "Agentga yuborildi:",
+        command.get("command"),
+        {
+            key: command[key]
+            for key in (
+                "hours",
+                "seconds",
+                "percent",
+                "count",
+                "value",
+                "channel",
+            )
+            if key in command
+        },
+    )
+
     return jsonify(response)
 
 
 @app.route("/command", methods=["POST"])
 def local_command():
     if not check_agent_secret():
-        return jsonify({"ok": False, "error": "Ruxsat berilmadi"}), 401
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Ruxsat berilmadi",
+            }
+        ), 401
+
     data = request.get_json(silent=True) or {}
     command = data.get("command")
-    allowed = {"shutdown", "restart", "sleep", "shutdown_after", "cancel_shutdown", "play_pause", "previous", "next", "stop", "mute", "volume_up", "volume_down", "volume_set"}
+
+    allowed = {
+        "shutdown",
+        "restart",
+        "sleep",
+        "shutdown_after",
+        "cancel_shutdown",
+        "play_pause",
+        "previous",
+        "next",
+        "stop",
+        "mute",
+        "volume_up",
+        "volume_down",
+        "volume_set",
+        "channel_set",
+    }
+
     if command not in allowed:
-        return jsonify({"ok": False, "error": "Noma'lum buyruq"}), 400
-    item = {"command": command, "created_at": time.time()}
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Noma'lum buyruq",
+            }
+        ), 400
+
+    item = {
+        "command": command,
+        "created_at": time.time(),
+    }
+
     if command == "sleep":
         hours = data.get("hours", 1)
+
         if hours not in (1, 2):
-            return jsonify({"ok": False, "error": "Faqat 1 yoki 2 soat"}), 400
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "Faqat 1 yoki 2 soat",
+                }
+            ), 400
+
         item["hours"] = hours
+
     elif command == "shutdown_after":
         try:
             seconds = int(data.get("seconds"))
+
             if seconds < 1:
                 raise ValueError
+
         except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "seconds noto'g'ri"}), 400
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "seconds noto'g'ri",
+                }
+            ), 400
+
         item["seconds"] = seconds
+
     elif command == "volume_set":
         try:
             percent = int(data.get("percent"))
+
             if not 0 <= percent <= 100:
                 raise ValueError
+
         except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "percent 0-100 oralig'ida bo'lishi kerak"}), 400
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "percent 0-100 oralig'ida bo'lishi kerak",
+                }
+            ), 400
+
         item["percent"] = percent
+
     elif command in ("volume_up", "volume_down"):
         try:
-            count = max(1, min(100, int(data.get("count", 1))))
+            count = max(
+                1,
+                min(100, int(data.get("count", 1)))
+            )
         except (TypeError, ValueError):
             count = 1
+
         item["count"] = count
+
+    elif command == "channel_set":
+        try:
+            channel = int(data.get("channel"))
+
+            if not 0 <= channel <= 999:
+                raise ValueError
+
+        except (TypeError, ValueError):
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "channel 0-999 oralig'ida bo'lishi kerak",
+                }
+            ), 400
+
+        item["channel"] = channel
+
     with QUEUE_LOCK:
         COMMAND_QUEUE.append(item)
+
+    print("Local buyruq navbatga qo'shildi:", item)
+
     return jsonify({"ok": True})
 
 
 @app.route("/v1.0/user/unlink", methods=["POST"])
 def unlink():
-    return jsonify({"request_id": request_id()})
+    return jsonify(
+        {
+            "request_id": request_id()
+        }
+    )
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
+
     print("=" * 60)
     print("ALISA KOMPYUTER SERVERI")
     print("=" * 60)
@@ -454,4 +1094,9 @@ if __name__ == "__main__":
     print("Yandex: /v1.0/user/devices/action")
     print("Til: O'zbekcha")
     print("=" * 60)
-    app.run(host="0.0.0.0", port=port, debug=False)
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+    )
